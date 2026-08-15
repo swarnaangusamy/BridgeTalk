@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="BridgeTalk — real-time sign language to text translation inside a video call."
+    />
+    <title>BridgeTalk</title>
+  </head>
+  <body>
+    <!-- React mounts here. The noscript message matters: this is an
+         accessibility project, so a JavaScript-disabled visitor gets a real
+         explanation rather than a blank page. -->
+    <div id="root"></div>
+    <noscript>
+      BridgeTalk needs JavaScript to run hand tracking in your browser. Please
+      enable JavaScript and reload this page.
+    </noscript>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

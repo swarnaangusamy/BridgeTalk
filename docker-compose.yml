@@ -1,0 +1,52 @@
+# ============================================================================
+# BridgeTalk — MySQL only, optional convenience.
+#
+# This file exists so you can get a database without installing MySQL locally.
+# It is NOT required: the documented path for this project is MySQL Workbench
+# on your own machine, and the review demo runs that way.
+#
+#   docker compose up -d        start MySQL in the background
+#   docker compose logs -f db   watch it come up
+#   docker compose down         stop it (data survives in the named volume)
+#   docker compose down -v      stop it AND delete all data
+#
+# With this running, set in .env:
+#   DATABASE_URL=mysql+pymysql://bridgetalk:bridgetalk_dev@localhost:3306/bridgetalk
+#
+# The credentials below are deliberately throwaway development values. They are
+# safe to commit precisely because this container is only ever reachable from
+# your own machine. Never reuse them anywhere real.
+# ============================================================================
+
+services:
+  db:
+    image: mysql:8.4
+    container_name: bridgetalk-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root_dev_only
+      MYSQL_DATABASE: bridgetalk
+      MYSQL_USER: bridgetalk
+      MYSQL_PASSWORD: bridgetalk_dev
+    ports:
+      # host:container — 3306 on the host so DATABASE_URL needs no change.
+      # If you already run MySQL locally on 3306, change this to "3307:3306"
+      # and update the port in DATABASE_URL to match.
+      - "3306:3306"
+    volumes:
+      - bridgetalk_mysql_data:/var/lib/mysql
+      # Everything in this directory runs, in filename order, the first time
+      # the container initialises an empty data volume. That gives us the
+      # schema and the two demo users for free.
+      - ./database:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # The backend fails with a confusing connection error if it starts before
+      # MySQL finishes initialising, so expose a real readiness signal.
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot_dev_only"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+volumes:
+  bridgetalk_mysql_data:
