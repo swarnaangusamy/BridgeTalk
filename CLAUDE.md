@@ -87,7 +87,7 @@ source .venv/bin/activate && pytest backend/tests -v
 ## Build phase status
 
 - [x] Phase 0 — scaffold, docs skeleton, setup scripts
-- [ ] Phase 1 — backend foundation, MySQL, JWT auth
+- [x] Phase 1 — backend foundation, MySQL, JWT auth
 - [ ] Phase 2 — meetings & transcripts API
 - [ ] Phase 3 — dataset acquisition & landmark extraction
 - [ ] Phase 4 — model training + evaluation
