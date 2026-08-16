@@ -189,6 +189,32 @@ async def predict_socket(
                 await inference_manager.send_personal(connection, {"type": "pong"})
                 continue
 
+            # Speech recognised by the browser's Web Speech API, relayed to the
+            # other participant. It travels on this socket rather than the
+            # signalling one because this is the meeting's *text* channel —
+            # both translation directions belong together, and a dropped video
+            # call must not take the captions down with it.
+            if message_type == "speech":
+                text = (message.get("text") or "").strip()
+                if not text:
+                    continue
+
+                await inference_manager.broadcast(
+                    normalized_code,
+                    {
+                        "type": "subtitle",
+                        "from": {"id": user.id, "name": user.name},
+                        "source": "speech",
+                        "text": text,
+                        # Interim results update the live subtitle but must not
+                        # be written to the transcript — the browser revises
+                        # them word by word as it hears more.
+                        "is_final": bool(message.get("is_final", False)),
+                    },
+                    exclude=connection,
+                )
+                continue
+
             if message_type != "landmarks":
                 await inference_manager.send_personal(
                     connection,

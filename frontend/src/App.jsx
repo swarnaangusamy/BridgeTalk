@@ -1,20 +1,22 @@
+import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
+
 import { AuthProvider, useAuth } from './context/AuthContext';
+import Dashboard from './pages/Dashboard';
+import History from './pages/History';
 import Login from './pages/Login';
+import MeetingRoom from './pages/MeetingRoom';
 import SignDetection from './pages/SignDetection';
 
 /**
- * Phase 5 shell: sign in, then the sign-detection screen.
+ * Gate for authenticated routes.
  *
- * Routing is deliberately a single conditional rather than react-router. There
- * are exactly two screens at this phase, and a router with two routes is
- * indirection without benefit. Phase 6 introduces Dashboard, MeetingRoom and
- * History, at which point the router earns its place.
+ * The `loading` branch matters more than it looks: without it, every page
+ * reload flashes the login screen for the moment /api/auth/me is in flight,
+ * and a user who *is* signed in gets bounced to Login and back.
  */
-function AppRoutes() {
+function RequireAuth({ children }) {
   const { isAuthenticated, loading } = useAuth();
 
-  // Without this branch the app flashes the login form for a moment on every
-  // reload while /api/auth/me is in flight, which looks like being logged out.
   if (loading) {
     return (
       <main className="grid min-h-screen place-items-center">
@@ -25,13 +27,33 @@ function AppRoutes() {
     );
   }
 
-  return isAuthenticated ? <SignDetection /> : <Login />;
+  return isAuthenticated ? children : <Navigate to="/login" replace />;
+}
+
+function LoginRoute() {
+  const { isAuthenticated, loading } = useAuth();
+  if (loading) return null;
+  return isAuthenticated ? <Navigate to="/" replace /> : <Login />;
 }
 
 export default function App() {
   return (
     <AuthProvider>
-      <AppRoutes />
+      <BrowserRouter>
+        <Routes>
+          <Route path="/login" element={<LoginRoute />} />
+
+          <Route path="/" element={<RequireAuth><Dashboard /></RequireAuth>} />
+          <Route path="/history" element={<RequireAuth><History /></RequireAuth>} />
+          <Route path="/meeting/:code" element={<RequireAuth><MeetingRoom /></RequireAuth>} />
+          {/* The standalone sign-detection screen from Phase 5. It stays
+              because it is the quickest way to check the model is working
+              without needing a second participant. */}
+          <Route path="/detect" element={<RequireAuth><SignDetection /></RequireAuth>} />
+
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </BrowserRouter>
     </AuthProvider>
   );
 }

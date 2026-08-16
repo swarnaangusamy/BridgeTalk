@@ -92,7 +92,7 @@ source .venv/bin/activate && pytest backend/tests -v
 - [ ] Phase 3 — dataset acquisition & landmark extraction
 - [ ] Phase 4 — model training + evaluation
 - [x] Phase 5 — real-time inference over WebSocket
-- [ ] Phase 6 — meeting room UI, WebRTC, speech-to-text
+- [x] Phase 6 — meeting room UI, WebRTC, speech-to-text
 - [ ] Phase 7 — Interview Mode, polish, documentation
 
 Update these boxes as phases complete.

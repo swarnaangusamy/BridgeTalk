@@ -181,6 +181,21 @@ export function useSignSocket({ meetingCode, enabled = true, onSubtitle } = {}) 
     return true;
   }, []);
 
+  /**
+   * Relay recognised speech to the other participant.
+   *
+   * Speech travels on this socket rather than the signalling one because this
+   * is the meeting's *text* channel — both translation directions belong
+   * together, and a dropped video call must not take the captions down too.
+   */
+  const sendSpeech = useCallback((text, isFinal) => {
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN || !text) return false;
+
+    socket.send(JSON.stringify({ type: 'speech', text, is_final: Boolean(isFinal) }));
+    return true;
+  }, []);
+
   const sendControl = useCallback((type) => {
     const socket = socketRef.current;
     if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type }));
@@ -196,6 +211,7 @@ export function useSignSocket({ meetingCode, enabled = true, onSubtitle } = {}) 
     serverError,
     modelInfo,
     sendLandmarks,
+    sendSpeech,
     clearSentence,
     backspace,
     isConnected: status === 'open',

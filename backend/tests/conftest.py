@@ -33,7 +33,7 @@ from app.main import app  # noqa: E402
 
 
 @pytest.fixture()
-def db_session():
+def db_session(monkeypatch):
     """A fresh, empty database for a single test."""
     engine = create_engine(
         "sqlite:///:memory:",
@@ -46,6 +46,19 @@ def db_session():
     )
     Base.metadata.create_all(bind=engine)
     TestingSessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+
+    # The WebSocket endpoints deliberately do NOT use the get_db dependency.
+    # A socket lives for minutes or hours, and a dependency-scoped session
+    # would hold a database connection open for that whole time — a handful of
+    # participants would exhaust the pool. They open a short-lived session
+    # instead, which means the dependency_overrides mechanism cannot reach
+    # them, and without this patch these tests would silently authenticate
+    # against the developer's real MySQL database.
+    import app.ws.inference as inference_module
+    import app.ws.signaling as signaling_module
+
+    monkeypatch.setattr(inference_module, "SessionLocal", TestingSessionLocal)
+    monkeypatch.setattr(signaling_module, "SessionLocal", TestingSessionLocal)
 
     session = TestingSessionLocal()
     try:

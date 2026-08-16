@@ -18,7 +18,7 @@ from app.api import auth, meetings, transcripts
 from app.config import settings
 from app.database import engine, init_db
 from app.ml.predictor import predictor
-from app.ws import inference
+from app.ws import inference, signaling
 from app.ws.connection_manager import inference_manager, signaling_manager
 
 logging.basicConfig(
@@ -105,6 +105,7 @@ app.include_router(auth.router)
 app.include_router(meetings.router)
 app.include_router(transcripts.router)
 app.include_router(inference.router)
+app.include_router(signaling.router)
 
 
 @app.get("/health", tags=["system"], summary="Liveness and database probe")
