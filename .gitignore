@@ -183,6 +183,8 @@ ml/models/*
 !ml/models/labels.json
 !ml/models/metadata.json
 !ml/models/dataset_manifest.json
+!ml/models/training_history.json
+!ml/models/evaluation_report.json
 
 # --- MediaPipe assets -----------------------------------------------------
 # Downloaded by scripts/setup.sh from Google's model repository.

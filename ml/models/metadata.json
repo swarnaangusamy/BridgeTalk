@@ -1,0 +1,67 @@
+{
+  "model": "static_model.keras",
+  "model_type": "MLP",
+  "task": "ASL static fingerspelling classification",
+  "trained_at": "2026-08-16T12:24:43.537472+00:00",
+  "normalization_version": 1,
+  "input_shape": [
+    63
+  ],
+  "output_shape": [
+    28
+  ],
+  "class_names": [
+    "A",
+    "B",
+    "C",
+    "D",
+    "E",
+    "F",
+    "G",
+    "H",
+    "I",
+    "J",
+    "K",
+    "L",
+    "M",
+    "N",
+    "O",
+    "P",
+    "Q",
+    "R",
+    "S",
+    "T",
+    "U",
+    "V",
+    "W",
+    "X",
+    "Y",
+    "Z",
+    "del",
+    "space"
+  ],
+  "source_dataset": "ASL Alphabet (grassknoted/asl-alphabet)",
+  "self_recorded_data": false,
+  "architecture": "Dense256-BN-Drop0.3 / Dense128-BN-Drop0.3 / Dense64 / Softmax",
+  "hyperparameters": {
+    "optimizer": "adam",
+    "learning_rate": 0.001,
+    "loss": "sparse_categorical_crossentropy",
+    "batch_size": 64,
+    "max_epochs": 100,
+    "epochs_run": 17,
+    "early_stopping_patience": 10,
+    "seed": 42
+  },
+  "metrics": {
+    "train_accuracy": 0.9903,
+    "val_accuracy": 0.9498,
+    "val_loss": 0.2649,
+    "train_val_gap": 0.0405
+  },
+  "training_time_seconds": 50.5,
+  "samples": {
+    "train": 104628,
+    "val": 5596
+  }
+}
