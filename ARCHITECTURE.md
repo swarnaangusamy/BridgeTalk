@@ -1,9 +1,7 @@
 # BridgeTalk — Architecture
 
-> **Phase 0 draft.** The component and sequence diagrams below describe the
-> system as designed and as it will exist at the end of Phase 6. Sections
-> tagged **_(Phase N)_** are completed when that phase lands. This file is the
-> engineering view; the [README](README.md) is the teaching view.
+> The engineering view. The [README](README.md) is the teaching view, and
+> covers the same system for a reader who has not seen the code.
 
 ---
 
@@ -94,15 +92,95 @@ Two things worth noticing in that diagram:
 
 ### 3.1 Sign → text (the core loop)
 
-_(Phase 5 — sequence diagram and per-file walkthrough.)_
+```mermaid
+sequenceDiagram
+    participant Cam as Webcam
+    participant MP as MediaPipe (browser)
+    participant WS as useSignSocket
+    participant SRV as /ws/predict
+    participant M as Keras model
+    participant SM as smoothing.py
+    participant P2 as Other participant
+
+    loop every frame (~60 Hz)
+        Cam->>MP: video frame
+        MP->>MP: 21 landmarks
+        MP-->>WS: draw skeleton (local only)
+    end
+
+    loop throttled to 10 Hz
+        WS->>SRV: {type:"landmarks", hands:[21x3]}
+        SRV->>SRV: normalize_primary_hand -> 63 floats
+        SRV->>M: model(features)
+        M-->>SRV: label + softmax
+        SRV->>SM: push(label, confidence)
+        SM-->>SRV: stable? sentence?
+        SRV-->>WS: {prediction, confidence, stable, sentence, latency_ms}
+    end
+
+    Note over SM,P2: only ACCEPTED letters are broadcast,<br/>never per-frame flicker
+    SRV->>P2: {type:"subtitle", source:"sign", text}
+```
+
+The throttle is the design decision worth defending. Detection runs at full
+frame rate because the overlay must look smooth and costs only local CPU.
+Sending runs at 10 Hz because that is all the recognition needs: the majority
+vote spans 10 frames, which at 10 Hz is a one-second decision — about how long
+a person holds a letter. Sending at 60 Hz would sextuple traffic and server
+load to reach the same conclusion a second later.
 
 ### 3.2 Speech → text
 
-_(Phase 6.)_
+The hearing participant's browser runs the Web Speech API locally
+(`useSpeechToText`). Interim results update their own caption immediately and
+are relayed to the peer, but only **final** results are persisted — interim
+text is revised word by word as the recogniser hears more, so storing it would
+fill the transcript with fragments.
+
+Speech travels over the **inference** socket, not the signalling one. That is
+deliberate: this is the meeting's *text* channel, both directions belong
+together, and a dropped video call must not take the captions down with it.
 
 ### 3.3 Call establishment (WebRTC signalling)
 
-_(Phase 6.)_
+```mermaid
+sequenceDiagram
+    participant A as Peer A (first to arrive)
+    participant S as /ws/signal
+    participant B as Peer B (second)
+
+    A->>S: connect
+    S-->>A: {joined, peers:[], should_initiate:false}
+    B->>S: connect
+    S-->>B: {joined, peers:[A], should_initiate:true}
+    S-->>A: {peer-joined, B}
+
+    B->>B: createOffer + setLocalDescription
+    B->>S: {offer, payload:SDP}
+    S-->>A: {offer, from:B, payload:SDP}
+
+    A->>A: setRemoteDescription + createAnswer
+    A->>S: {answer, payload:SDP}
+    S-->>B: {answer, from:A, payload:SDP}
+
+    par trickle ICE, both directions
+        A->>S: {ice-candidate}
+        S-->>B: {ice-candidate, from:A}
+        B->>S: {ice-candidate}
+        S-->>A: {ice-candidate, from:B}
+    end
+
+    A<<-->>B: audio + video, peer-to-peer<br/>(server is no longer involved)
+```
+
+**Exactly one peer initiates.** Whoever arrives second is told
+`should_initiate: true`, because they are the one who knows somebody is already
+waiting. If both offered simultaneously the negotiations would collide ("glare")
+and both would have to back off and retry.
+
+**The server never parses SDP or ICE.** It stamps the sender and forwards the
+payload verbatim. Not understanding the contents means a WebRTC specification
+change needs no backend change at all.
 
 ---
 
@@ -130,16 +208,15 @@ stops a `password_hash` column accidentally appearing in a JSON response.
 
 ## 5. The normalisation contract
 
-_(Full specification in Phase 3; the constraint is stated here because it
-shapes three separate files.)_
+The constraint is stated here because it shapes several files at once. Full
+explanation in [ml/README.md](ml/README.md#landmark-normalisation--the-critical-detail).
 
 The same normalisation procedure is implemented three times:
 
 | Implementation | Runs | Purpose |
 |---|---|---|
-| `ml/scripts/preprocess.py` | Offline, once | Prepares the training set |
-| `backend/app/ml/normalization.py` | Per inference request | Prepares live input |
-| `frontend/src/utils/landmarkUtils.js` | In the browser | Client-side parity checks and overlay maths |
+| `backend/app/ml/normalization.py` | Offline **and** per inference request | The single Python implementation. The ml/ training scripts import it rather than reimplementing it, so training and inference are identical by construction |
+| `frontend/src/utils/landmarkUtils.js` | In the browser | The one boundary that can genuinely diverge, and what the parity test guards |
 
 If these three disagree by even a small amount, training accuracy stays at 97%
 while live predictions become noise — the classic silent failure of this kind of
@@ -155,13 +232,36 @@ then a loud startup error instead of a mysterious accuracy collapse.
 
 ## 6. Data model
 
-_(Phase 1 — Mermaid ER diagram, indexes and cascade behaviour.)_
+Full ER diagram in the [README](README.md#12-database-schema). The three
+decisions that shape queries:
+
+- **`meetings.ended_at IS NULL` is the definition of "active".** No separate
+  boolean, so nothing can fall out of sync.
+- **`meeting_participants` is a log, not a set.** Rejoining writes a new row, so
+  a dropped connection stays visible instead of being silently overwritten.
+- **Composite indexes match the actual access pattern**:
+  `transcripts(meeting_id, created_at)` serves "this meeting's lines in order"
+  in one lookup, and `meeting_participants(meeting_id, user_id)` serves "is this
+  user in this meeting?".
+
+All foreign keys cascade on delete, so removing a user cannot leave rows
+pointing at an id that no longer exists.
 
 ---
 
 ## 7. Failure modes and how the system responds
 
-_(Phases 5–7. Planned coverage: camera permission denied, no hand in frame,
-model file missing or version-mismatched, WebSocket dropped mid-meeting,
-WebRTC negotiation failing behind a symmetric NAT, MySQL unreachable at
-startup.)_
+| Failure | Detected by | Response |
+|---|---|---|
+| MySQL unreachable at startup | `lifespan` probe in `main.py` | Refuses to start, logs the fix. A server that starts and 500s every request is far harder to diagnose |
+| No trained model | `predictor.load()` | **Starts anyway** — auth, meetings and transcripts still work. The socket reports `MODEL_NOT_LOADED` |
+| Model normalisation version mismatch | `predictor.load()` | **Refuses to load.** A mismatched model returns confident nonsense with nothing in the logs |
+| Camera permission denied | `getUserMedia` error name | Named message per cause (`NotAllowedError`, `NotReadableError`, `NotFoundError`) with the actual fix |
+| No hand in frame | Empty `hands` array | Neutral state emitted **without calling the model** — there are no landmarks to classify |
+| Low confidence | Confidence gate | Frame discarded; the UI shows "settling" rather than a wrong letter |
+| WebSocket dropped | `onclose` | Exponential backoff with jitter, up to 12 attempts. Code 1008 (bad token) stops immediately — retrying cannot fix it |
+| Slow network | `bufferedAmount > 64 KB` | Frames dropped rather than queued. A backlog makes predictions arrive seconds late |
+| WebRTC cannot connect | `connectionstatechange` → `failed` | Explains the NAT/TURN cause rather than spinning |
+| Peer leaves | `peer-left` from the relay | Remote stream cleared, tile shows the waiting state |
+| Render exception | `ErrorBoundary` | Explained error page with reload, instead of a white screen mid-call |
+| Transcript write fails | `.catch()` on the API call | Swallowed deliberately — the words are already on screen, and that is what the conversation needs |
