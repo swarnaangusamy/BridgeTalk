@@ -118,6 +118,12 @@ export const meetings = {
   leave: (code) => request(`/api/meetings/${encodeURIComponent(code)}/leave`, { method: 'POST' }),
   end: (code) => request(`/api/meetings/${encodeURIComponent(code)}/end`, { method: 'POST' }),
   history: () => request('/api/meetings/history'),
+  logFocusEvent: (code, eventType) =>
+    request(`/api/meetings/${encodeURIComponent(code)}/focus-events`, {
+      method: 'POST',
+      body: { event_type: eventType },
+    }),
+  focusEvents: (code) => request(`/api/meetings/${encodeURIComponent(code)}/focus-events`),
 };
 
 // --- transcripts -----------------------------------------------------------

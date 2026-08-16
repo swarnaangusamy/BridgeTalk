@@ -2,11 +2,13 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 
 import HandOverlayCanvas from '../components/HandOverlayCanvas';
+import ModeSwitch from '../components/ModeSwitch';
 import SignDetectionPanel from '../components/SignDetectionPanel';
 import SubtitleBar from '../components/SubtitleBar';
 import TranscriptPanel from '../components/TranscriptPanel';
 import VideoTile from '../components/VideoTile';
 import { useAuth } from '../context/AuthContext';
+import { useFocusMonitor } from '../hooks/useFocusMonitor';
 import { useHandLandmarker } from '../hooks/useHandLandmarker';
 import { useSignSocket } from '../hooks/useSignSocket';
 import { useSpeechToText } from '../hooks/useSpeechToText';
@@ -327,6 +329,25 @@ export default function MeetingRoom() {
     else speech.stop();
   }, [speechOn, speech]);
 
+  // --- Interview Mode ------------------------------------------------------
+  // Enabled per meeting, chosen by the host at creation time. Each focus
+  // change is posted to the backend so the record survives a page reload —
+  // a tab switch the participant then refreshes away should still be there.
+  const handleFocusEvent = useCallback(
+    (eventType) => {
+      if (!meeting?.is_interview_mode) return;
+      meetingsApi.logFocusEvent(code, eventType).catch(() => {
+        // Best effort. A failed log must never interrupt the meeting itself.
+      });
+    },
+    [code, meeting],
+  );
+
+  const focus = useFocusMonitor({
+    enabled: Boolean(meeting?.is_interview_mode),
+    onEvent: handleFocusEvent,
+  });
+
   // --- the call ------------------------------------------------------------
   const { remoteStream, connectionState, peer, error: rtcError, hangUp } = useWebRTC({
     meetingCode: code,
@@ -458,6 +479,12 @@ export default function MeetingRoom() {
 
         {/* --- right column ---------------------------------------------- */}
         <aside className="flex flex-col gap-4">
+          <ModeSwitch
+            enabled={Boolean(meeting?.is_interview_mode)}
+            awayCount={focus.awayCount}
+            isAway={focus.isAway}
+          />
+
           <SignDetectionPanel
             status={signSocketStatus}
             prediction={prediction}

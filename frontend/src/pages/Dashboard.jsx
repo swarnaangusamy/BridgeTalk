@@ -16,6 +16,7 @@ export default function Dashboard() {
   const navigate = useNavigate();
 
   const [title, setTitle] = useState('BridgeTalk meeting');
+  const [interviewMode, setInterviewMode] = useState(false);
   const [joinCode, setJoinCode] = useState('');
   const [created, setCreated] = useState(null);
   const [error, setError] = useState(null);
@@ -26,7 +27,7 @@ export default function Dashboard() {
     setError(null);
     setBusy(true);
     try {
-      setCreated(await meetingsApi.create(title));
+      setCreated(await meetingsApi.create(title, interviewMode));
     } catch (cause) {
       setError(cause.message);
     } finally {
@@ -96,6 +97,22 @@ export default function Dashboard() {
               type="text" required value={title} onChange={(e) => setTitle(e.target.value)}
               className="rounded-lg border border-ink-700 bg-ink-900 px-3 py-2 text-slate-100"
             />
+          </label>
+
+          <label className="flex items-start gap-2 text-sm text-slate-200">
+            <input
+              type="checkbox"
+              checked={interviewMode}
+              onChange={(e) => setInterviewMode(e.target.checked)}
+              className="mt-1"
+            />
+            <span>
+              Interview Mode
+              <span className="block text-xs text-slate-400">
+                Logs when a participant switches away from the tab. A deterrent,
+                not proctoring — it cannot see other devices or the room.
+              </span>
+            </span>
           </label>
 
           <button type="submit" disabled={busy} className="btn-primary">

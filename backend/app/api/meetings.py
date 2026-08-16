@@ -8,8 +8,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.deps import CurrentUser, DbSession
-from app.models.meeting import Meeting, MeetingParticipant
+from app.models.meeting import FocusEvent, FocusEventType, Meeting, MeetingParticipant
 from app.models.user import User
+from app.schemas.focus import FocusEventCreate, FocusEventPublic, FocusSummary
 from app.schemas.meeting import (
     MeetingCreate,
     MeetingDetail,
@@ -221,6 +222,106 @@ def leave_meeting(code: str, db: DbSession, current_user: CurrentUser) -> Meetin
     db.commit()
 
     return _load_meeting_by_code(db, code)
+
+
+@router.post(
+    "/{code}/focus-events",
+    response_model=FocusEventPublic,
+    status_code=status.HTTP_201_CREATED,
+    summary="Log an Interview Mode focus change",
+)
+def log_focus_event(
+    code: str, payload: FocusEventCreate, db: DbSession, current_user: CurrentUser
+) -> FocusEventPublic:
+    """Record that the caller's window lost or regained focus.
+
+    Stored server-side rather than kept in browser state so the record
+    survives a page reload — a tab switch the participant then refreshes away
+    should still appear in the meeting record.
+
+    What this can and cannot see is worth being precise about, because
+    overstating it is the fastest way to lose credibility: the browser reports
+    only that *this tab* lost focus or became hidden. It cannot detect a second
+    monitor, a phone, notes on the desk, or another person in the room. This is
+    a deterrent, not proctoring.
+    """
+    meeting = _load_meeting_by_code(db, code)
+    _assert_participant_or_host(meeting, current_user)
+
+    if not meeting.is_interview_mode:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Interview Mode is not enabled for this meeting",
+        )
+
+    event = FocusEvent(
+        meeting_id=meeting.id,
+        user_id=current_user.id,
+        event_type=payload.event_type,
+    )
+    db.add(event)
+    db.commit()
+    db.refresh(event)
+
+    return FocusEventPublic(
+        id=event.id,
+        meeting_id=event.meeting_id,
+        user_id=event.user_id,
+        user_name=current_user.name,
+        event_type=event.event_type,
+        created_at=event.created_at,
+    )
+
+
+@router.get(
+    "/{code}/focus-events",
+    response_model=FocusSummary,
+    summary="Focus events for a meeting (host only)",
+)
+def get_focus_events(code: str, db: DbSession, current_user: CurrentUser) -> FocusSummary:
+    """Summarise focus events. Host only.
+
+    Restricted to the host because this is a record *about* the participants:
+    letting everyone read everyone else's attention log would be surveillance
+    of each other rather than a tool for the person running the interview.
+    """
+    meeting = _load_meeting_by_code(db, code)
+
+    if meeting.host_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the meeting host can read focus events",
+        )
+
+    rows = db.scalars(
+        select(FocusEvent)
+        .where(FocusEvent.meeting_id == meeting.id)
+        .options(selectinload(FocusEvent.user))
+        .order_by(FocusEvent.created_at.asc())
+    ).all()
+
+    events = [
+        FocusEventPublic(
+            id=row.id,
+            meeting_id=row.meeting_id,
+            user_id=row.user_id,
+            user_name=row.user.name,
+            event_type=row.event_type,
+            created_at=row.created_at,
+        )
+        for row in rows
+    ]
+
+    return FocusSummary(
+        meeting_id=meeting.id,
+        total_events=len(events),
+        # A `return` is the recovery, not another offence — counting all three
+        # types would roughly double the apparent number of incidents.
+        away_count=sum(
+            1 for event in events if event.event_type != FocusEventType.RETURN
+        ),
+        events=events,
+    )
 
 
 @router.post("/{code}/end", response_model=MeetingDetail, summary="End a meeting (host only)")
