@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from app import __version__
-from app.api import auth
+from app.api import auth, meetings, transcripts
 from app.config import settings
 from app.database import engine, init_db
 
@@ -87,6 +87,8 @@ app.add_middleware(
 )
 
 app.include_router(auth.router)
+app.include_router(meetings.router)
+app.include_router(transcripts.router)
 
 
 @app.get("/health", tags=["system"], summary="Liveness and database probe")

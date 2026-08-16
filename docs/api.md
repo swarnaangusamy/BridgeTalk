@@ -25,21 +25,130 @@ Tokens are HS256 JWTs issued by `POST /api/auth/login`, signed with
 
 ## REST endpoints
 
-| Method | Path | Auth | Purpose | Phase |
+| Method | Path | Auth | Purpose | Status |
 |---|---|:--:|---|:--:|
-| `GET` | `/health` | — | Liveness probe | 1 |
-| `POST` | `/api/auth/register` | — | Create an account | 1 |
-| `POST` | `/api/auth/login` | — | Exchange credentials for a JWT | 1 |
-| `GET` | `/api/auth/me` | ✅ | Current user profile | 1 |
-| `POST` | `/api/meetings` | ✅ | Create a meeting, returns a short join code | 2 |
-| `GET` | `/api/meetings/{code}` | ✅ | Meeting detail | 2 |
-| `POST` | `/api/meetings/{code}/join` | ✅ | Join, records a participant row | 2 |
-| `GET` | `/api/meetings/history` | ✅ | Past meetings for the current user | 2 |
-| `POST` | `/api/transcripts` | ✅ | Append a transcript line | 2 |
-| `GET` | `/api/transcripts/{meeting_id}` | ✅ | Full transcript | 2 |
-| `GET` | `/api/transcripts/{meeting_id}/export` | ✅ | Download as `.txt` | 2 |
+| `GET` | `/health` | — | Liveness probe + database check | ✅ |
+| `POST` | `/api/auth/register` | — | Create an account, returns a token | ✅ |
+| `POST` | `/api/auth/login` | — | OAuth2 form login (Swagger's Authorize button) | ✅ |
+| `POST` | `/api/auth/login/json` | — | JSON login (what the React client calls) | ✅ |
+| `GET` | `/api/auth/me` | ✅ | Current user profile | ✅ |
+| `POST` | `/api/meetings` | ✅ | Create a meeting, returns a short join code | ✅ |
+| `GET` | `/api/meetings/history` | ✅ | Meetings the caller hosted or attended | ✅ |
+| `GET` | `/api/meetings/{code}` | ✅ | Meeting detail with participants | ✅ |
+| `POST` | `/api/meetings/{code}/join` | ✅ | Join, records an attendance row | ✅ |
+| `POST` | `/api/meetings/{code}/leave` | ✅ | Stamp the caller's attendance row | ✅ |
+| `POST` | `/api/meetings/{code}/end` | ✅ | End the meeting (host only) | ✅ |
+| `POST` | `/api/transcripts` | ✅ | Append a transcript line | ✅ |
+| `GET` | `/api/transcripts/{meeting_id}` | ✅ | Full transcript, chronological | ✅ |
+| `GET` | `/api/transcripts/{meeting_id}/export` | ✅ | Download as `.txt` | ✅ |
 
-_(Request and response bodies: Phases 1–2.)_
+### Access control
+
+Three distinct levels, and the difference matters:
+
+| Level | Applies to | Rule |
+|---|---|---|
+| Public | `/health`, register, login | No token needed |
+| Authenticated | `GET /api/meetings/{code}` | Any valid token. You need to see a meeting's title before deciding to join it. |
+| **Member** | every transcript endpoint, leave | You must be the host or a recorded participant. Returns **403** otherwise. |
+
+Being logged in is deliberately *not* sufficient to read a transcript. A
+transcript is the record of a private conversation, so membership is the
+boundary — and it is enforced in the API, not in the frontend.
+
+Two further rules worth knowing:
+
+- **Transcript lines are always attributed to the token holder**, never to a
+  `user_id` in the request body. There is no such field in the schema. This is
+  what stops anyone putting words in another participant's permanent record.
+- **Only the host can end a meeting.** Ending it makes the code unusable, so
+  leaving that open to any participant would be a griefing vector.
+
+### Meeting codes
+
+Format `XXX-XXX`, e.g. `8DD-4FB`, drawn from the alphabet
+`ABCDEFGHJKMNPQRSTUVWXYZ23456789`.
+
+`0`, `1`, `I`, `L` and `O` are excluded on purpose. Codes get read aloud and
+typed by someone watching a video call rather than their keyboard, and those
+five characters are what turn "join my meeting" into three failed attempts.
+Codes are generated with `secrets.choice`, not `random`, because a meeting code
+is the only thing between a stranger and a private conversation. Lookups are
+case-insensitive.
+
+### Examples
+
+**Create a meeting**
+
+```bash
+curl -X POST http://localhost:8000/api/meetings \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"title":"Project review","is_interview_mode":true}'
+```
+
+```json
+{
+  "id": 102, "code": "8DD-4FB", "title": "Project review",
+  "host": {"id": 101, "name": "Demo Deaf User", "email": "deaf.demo@example.com",
+           "role": "deaf", "created_at": "2026-08-15T23:29:10"},
+  "is_interview_mode": true,
+  "started_at": null, "ended_at": null,
+  "created_at": "2026-08-16T12:16:13", "is_active": true
+}
+```
+
+`started_at` is `null` because creating a meeting and being in it are different
+things — the clock starts when the first participant joins.
+
+**Join**
+
+```json
+{ "meeting": { "...": "as above, plus a participants array" },
+  "is_first_participant": true }
+```
+
+`is_first_participant` is true for exactly one peer. The frontend uses it to
+decide which side creates the WebRTC offer; if both peers offered at once the
+negotiation would collide.
+
+**Append a transcript line**
+
+```bash
+curl -X POST http://localhost:8000/api/transcripts \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"meeting_id":102,"source":"sign","content":"HELLO","confidence":0.94}'
+```
+
+`confidence` is the model's softmax probability, and belongs only on `sign`
+lines. Leave it null for `speech`: the Web Speech API reports its own
+confidence, but the two numbers mean different things and averaging them
+would be meaningless.
+
+**Export**
+
+`GET /api/transcripts/{id}/export` returns `text/plain` with a
+`Content-Disposition: attachment` header:
+
+```
+BridgeTalk meeting transcript
+============================================================
+Meeting:  Phase 2 acceptance
+Code:     8DD-4FB
+Started:  2026-08-16T12:16:14
+Ended:    still active
+Lines:    3
+============================================================
+
+[12:16:31] SIGN  Demo Deaf User: HELLO  (94%)
+[12:16:32] SPEECH Demo Hearing User: Hello, good to meet you
+[12:16:32] SIGN  Demo Deaf User: THANK YOU  (88%)
+```
+
+Plain text rather than PDF on purpose: every screen reader handles it without
+an extra dependency, which is the right default for an accessibility project.
+The `SIGN`/`SPEECH` tag and the confidence percentage are what make the record
+auditable after the fact — a reader can see which lines came from the model,
+and how sure it was, instead of assuming every line is equally reliable.
 
 ---
 

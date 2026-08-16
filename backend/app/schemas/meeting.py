@@ -1,0 +1,77 @@
+"""Pydantic schemas for meetings and participants."""
+
+from datetime import datetime
+from typing import Optional
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from app.schemas.user import UserPublic
+
+
+class MeetingCreate(BaseModel):
+    """Request body for POST /api/meetings."""
+
+    title: str = Field(
+        min_length=1,
+        max_length=200,
+        examples=["Project review with Dr. Manavalan"],
+    )
+    is_interview_mode: bool = Field(
+        default=False,
+        description=(
+            "Logs tab-switch and window-blur events for this meeting. A "
+            "deterrent, not proctoring — it cannot detect a second device or "
+            "another person in the room."
+        ),
+    )
+
+
+class ParticipantPublic(BaseModel):
+    """One participant's attendance record."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    user: UserPublic
+    joined_at: datetime
+    left_at: Optional[datetime] = None
+
+
+class MeetingPublic(BaseModel):
+    """A meeting as returned by the API."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    code: str
+    title: str
+    host: UserPublic
+    is_interview_mode: bool
+    started_at: Optional[datetime] = None
+    ended_at: Optional[datetime] = None
+    created_at: datetime
+
+    # Computed rather than stored: a meeting is active until someone ends it,
+    # so `ended_at is None` is the single source of truth and cannot fall out
+    # of sync with a separate boolean column.
+    is_active: bool
+
+
+class MeetingDetail(MeetingPublic):
+    """A meeting plus its attendance list.
+
+    Separate from MeetingPublic so that listing history does not drag every
+    participant row along with every meeting.
+    """
+
+    participants: list[ParticipantPublic] = []
+
+
+class MeetingJoinResponse(BaseModel):
+    """Response to POST /api/meetings/{code}/join."""
+
+    meeting: MeetingDetail
+    # True when this call is what started the meeting clock, i.e. the caller is
+    # the first person in. The frontend uses it to decide who creates the
+    # WebRTC offer, which is how we avoid both peers offering at once.
+    is_first_participant: bool
