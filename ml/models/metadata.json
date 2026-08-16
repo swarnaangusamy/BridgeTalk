@@ -2,7 +2,7 @@
   "model": "static_model.keras",
   "model_type": "MLP",
   "task": "ASL static fingerspelling classification",
-  "trained_at": "2026-08-16T12:24:43.537472+00:00",
+  "trained_at": "2026-08-16T12:49:28.410452+00:00",
   "normalization_version": 1,
   "input_shape": [
     63
@@ -49,19 +49,19 @@
     "loss": "sparse_categorical_crossentropy",
     "batch_size": 64,
     "max_epochs": 100,
-    "epochs_run": 17,
+    "epochs_run": 18,
     "early_stopping_patience": 10,
     "seed": 42
   },
   "metrics": {
-    "train_accuracy": 0.9903,
-    "val_accuracy": 0.9498,
-    "val_loss": 0.2649,
-    "train_val_gap": 0.0405
+    "train_accuracy": 0.9928,
+    "val_accuracy": 0.9404,
+    "val_loss": 0.3335,
+    "train_val_gap": 0.0523
   },
-  "training_time_seconds": 50.5,
+  "training_time_seconds": 62.2,
   "samples": {
-    "train": 104628,
-    "val": 5596
+    "train": 119840,
+    "val": 6412
   }
 }

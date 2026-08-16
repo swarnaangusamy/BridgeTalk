@@ -219,6 +219,13 @@ def main() -> int:
         help="Shuffle before splitting. Produces a HIGHER but DISHONEST accuracy — "
         "see the module docstring. Provided so the difference can be measured.",
     )
+    parser.add_argument(
+        "--balance",
+        choices=["min", "none"],
+        default="min",
+        help="'min' (default) subsamples every class down to the size of the "
+        "smallest, so no class dominates. 'none' keeps everything.",
+    )
     args = parser.parse_args()
 
     if not args.input.is_file():
@@ -251,6 +258,45 @@ def main() -> int:
     labels_sorted = sorted(frame["label"].unique())
     label_to_index = {label: index for index, label in enumerate(labels_sorted)}
     print(f"\n  {len(labels_sorted)} classes: {', '.join(labels_sorted)}")
+
+    # --- balance ------------------------------------------------------------
+    # Classes do not survive extraction equally: N and M lose ~35% of their
+    # images to failed hand detection while Y loses ~1%. Left alone, the model
+    # sees far more Y than N and its prior tilts accordingly — which makes the
+    # already-hard classes harder.
+    #
+    # Subsampling is done with an even stride across capture order, not by
+    # taking the first N rows. Taking the first N would keep only the earliest
+    # frames of each recording and throw away whatever variation appeared
+    # later, which is exactly the variation worth training on.
+    raw_counts = frame["label"].value_counts().to_dict()
+    balance_report = {"mode": args.balance, "before": {k: int(v) for k, v in sorted(raw_counts.items())}}
+
+    if args.balance == "min":
+        target = int(min(raw_counts.values()))
+        smallest_class = min(raw_counts, key=raw_counts.get)
+        print(f"\nBalancing every class down to {target:,} rows (smallest: '{smallest_class}')")
+
+        balanced_parts = []
+        for label in labels_sorted:
+            subset = frame[frame["label"] == label].copy()
+            subset["_order"] = subset["source"].map(numeric_suffix)
+            subset = subset.sort_values("_order")
+
+            if len(subset) > target:
+                # np.linspace gives evenly spaced indices spanning the full range.
+                keep = np.linspace(0, len(subset) - 1, target).round().astype(int)
+                subset = subset.iloc[np.unique(keep)]
+
+            balanced_parts.append(subset.drop(columns="_order"))
+
+        frame = pd.concat(balanced_parts)
+        dropped = sum(raw_counts.values()) - len(frame)
+        print(f"  {sum(raw_counts.values()):,} → {len(frame):,} rows ({dropped:,} dropped)")
+
+    balance_report["after"] = {
+        k: int(v) for k, v in sorted(frame["label"].value_counts().to_dict().items())
+    }
 
     # --- split ---------------------------------------------------------------
     split_mode = "random (INFLATES accuracy)" if args.random_split else "contiguous by capture order"
@@ -352,6 +398,7 @@ def main() -> int:
         "classes": labels_sorted,
         "class_count": len(labels_sorted),
         "dropped_classes": dropped_report,
+        "class_balancing": balance_report,
         "split": {
             "mode": "random" if args.random_split else "contiguous_by_capture_order",
             "rationale": (
