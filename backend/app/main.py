@@ -17,6 +17,9 @@ from app import __version__
 from app.api import auth, meetings, transcripts
 from app.config import settings
 from app.database import engine, init_db
+from app.ml.predictor import predictor
+from app.ws import inference
+from app.ws.connection_manager import inference_manager, signaling_manager
 
 logging.basicConfig(
     level=logging.INFO,
@@ -54,6 +57,18 @@ async def lifespan(app: FastAPI):
     init_db()
     logger.info("Tables verified")
 
+    # Load the sign model once, here, rather than on the first prediction.
+    # Loading it per request would add hundreds of milliseconds to a system
+    # whose whole point is sub-second response.
+    #
+    # A missing model is NOT fatal: auth, meetings and transcripts must still
+    # work while someone is training one. The inference socket reports
+    # MODEL_NOT_LOADED to any client that connects.
+    if predictor.load():
+        logger.info("Sign recognition ready")
+    else:
+        logger.warning("Sign recognition unavailable — %s", predictor.load_error)
+
     yield
 
     logger.info("BridgeTalk backend shutting down")
@@ -89,6 +104,7 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(meetings.router)
 app.include_router(transcripts.router)
+app.include_router(inference.router)
 
 
 @app.get("/health", tags=["system"], summary="Liveness and database probe")
@@ -115,4 +131,11 @@ def health() -> dict:
         "database_error": database_error,
         # Handy during the review: proves which backend the frontend reached.
         "dialect": engine.dialect.name,
+        # Model status here means the frontend can explain *why* sign detection
+        # is unavailable instead of just failing to produce predictions.
+        "model": predictor.describe(),
+        "websockets": {
+            "inference": inference_manager.stats(),
+            "signaling": signaling_manager.stats(),
+        },
     }
