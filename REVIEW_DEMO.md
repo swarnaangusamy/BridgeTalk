@@ -178,7 +178,32 @@ away.
 **How does this scale beyond fingerspelling?**
 Same pipeline, different data and labels. Landmarks are language-agnostic, which
 is exactly why moving to Indian Sign Language would mean swapping the dataset,
-not rewriting the system. Word-level signs need the LSTM, which is specified.
+not rewriting the system. Word-level signs need the LSTM — which is built.
+
+**Why is the "Words" toggle greyed out?**
+Because there is no trained Model B on this machine, and the UI says so rather
+than hiding the option. Everything around it is built and tested: video
+extraction, the signer-disjoint split, the LSTM, the live sequence buffer, the
+WebSocket routing and this toggle. What is missing is the WLASL dataset — a
+multi-gigabyte download we chose not to make. **We are not quoting an accuracy
+for it, because we have not measured one.**
+
+**What would Model B score?**
+Published WLASL-20 baselines sit around 55–80%, with larger models than ours.
+That is the literature's number, not ours, and live performance would be lower
+again for a structural reason worth stating: Model B trains on clips trimmed to
+a single sign, but runs on an unbroken stream where nothing marks where one sign
+ends. Continuous segmentation is an open research problem. We handle the easy
+half — a run of hand-free frames ends a sign, and windows that are mostly empty
+are never classified — and we do not pretend that covers a signer who never
+pauses.
+
+**Why is Model B's evaluation stricter than Model A's?**
+WLASL records `signer_id`; ASL Alphabet does not. So Model B's test split holds
+out entire *people*, and its accuracy answers "will this work for someone new?".
+Model A's split can only manage "the same hands, later frames" — we say so in
+the README rather than letting 90.5% imply more than it does. The two numbers
+are not directly comparable, and the stricter one will look worse.
 
 ### On the system
 
