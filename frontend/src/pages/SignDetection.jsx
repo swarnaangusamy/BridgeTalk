@@ -38,9 +38,13 @@ export default function SignDetection() {
   const [cameraError, setCameraError] = useState(null);
   const [landmarks, setLandmarks] = useState([]);
   const [detecting, setDetecting] = useState(true);
+  const [mode, setMode] = useState('static');
 
+  // Fingerspelling is one-handed, so tracking a second hand would be wasted
+  // work. Word signs frequently use both, and Model B's 126-wide features have
+  // a slot for each — tracking only one would leave half of every input zero.
   const { detect, status: modelStatus, error: modelError, isReady } = useHandLandmarker({
-    numHands: 1,
+    numHands: mode === 'dynamic' ? 2 : 1,
     enabled: true,
   });
 
@@ -53,6 +57,7 @@ export default function SignDetection() {
     sentence,
     serverError,
     modelInfo,
+    dynamicModelInfo,
     sendLandmarks,
     clearSentence,
     backspace,
@@ -138,18 +143,19 @@ export default function SignDetection() {
           lastSentRef.current = now;
           // toWireFormat produces coordinates only. No pixel data is included,
           // and there is nowhere in this call for a frame to hide.
-          sendLandmarks(toWireFormat(result), 'static');
+          sendLandmarks(toWireFormat(result), mode);
         }
       } else {
         setLandmarks([]);
 
         // Still tell the server about empty frames, throttled the same way:
         // that is what drives the neutral reset and lets lowering your hand
-        // close the current word.
+        // close the current word. In dynamic mode it is also what marks the
+        // boundary between two signs.
         const now = performance.now();
         if (now - lastSentRef.current >= SEND_INTERVAL_MS) {
           lastSentRef.current = now;
-          sendLandmarks([], 'static');
+          sendLandmarks([], mode);
         }
       }
 
@@ -162,7 +168,7 @@ export default function SignDetection() {
       active = false;
       cancelAnimationFrame(rafRef.current);
     };
-  }, [cameraStatus, isReady, detecting, detect, sendLandmarks]);
+  }, [cameraStatus, isReady, detecting, detect, sendLandmarks, mode]);
 
   const handDetected = landmarks.length > 0;
 
@@ -264,7 +270,10 @@ export default function SignDetection() {
           sentence={sentence}
           serverError={serverError}
           modelInfo={modelInfo}
+          dynamicModelInfo={dynamicModelInfo}
           handDetected={handDetected}
+          mode={mode}
+          onModeChange={setMode}
           onClear={clearSentence}
           onBackspace={backspace}
         />

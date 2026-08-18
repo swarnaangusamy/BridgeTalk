@@ -57,6 +57,8 @@ class Settings(BaseSettings):
     dynamic_model_path: str = "ml/models/dynamic_model.keras"
     model_metadata_path: str = "ml/models/metadata.json"
     labels_path: str = "ml/models/labels.json"
+    dynamic_metadata_path: str = "ml/models/dynamic_metadata.json"
+    dynamic_labels_path: str = "ml/models/labels_dynamic.json"
 
     # --- Real-time smoothing (Section 9 of the build spec) ----------------
     confidence_threshold: float = 0.80
@@ -65,6 +67,31 @@ class Settings(BaseSettings):
     majority_min: int = 7
     neutral_reset_frames: int = 8
     sequence_length: int = 30
+
+    # --- Dynamic (word-sign) mode ----------------------------------------
+    # Separate values from the static ones, because the two modes have
+    # genuinely different dynamics rather than because tuning was fun:
+    #
+    #   * threshold is LOWER (0.70) — 20 word classes trained on ~20 clips
+    #     each produce less peaked softmax output than 28 letter classes
+    #     trained on thousands. Reusing 0.80 would reject nearly everything.
+    #   * cooldown is LONGER (2500 ms) — a word sign takes one to two seconds
+    #     to perform, so a 1.5 s debounce could fire twice within one sign.
+    #   * the majority window is SMALLER (5 of 3) — consecutive dynamic
+    #     predictions come from windows overlapping by 29/30 frames, so they
+    #     are far more correlated than consecutive static predictions. Ten
+    #     such votes would add latency without adding independent evidence.
+    dynamic_confidence_threshold: float = 0.70
+    dynamic_cooldown_ms: int = 2500
+    dynamic_majority_window: int = 5
+    dynamic_majority_min: int = 3
+    # Classify every Nth frame instead of every frame. See ml/sequence.py.
+    dynamic_stride: int = 3
+    # Fraction of a window that must contain a detected hand before it is
+    # classified. Matches the threshold extraction used on training clips.
+    dynamic_min_detection_rate: float = 0.30
+    # Consecutive hand-free frames that count as a sign boundary.
+    dynamic_reset_frames: int = 8
 
     # ------------------------------------------------------------------ #
     # Derived values

@@ -12,6 +12,8 @@
  *     colour blindness and a monochrome projector.
  */
 
+import RecognitionModeToggle from './RecognitionModeToggle';
+
 const STATUS_LABELS = {
   idle: 'Not connected',
   connecting: 'Connecting…',
@@ -42,7 +44,10 @@ export default function SignDetectionPanel({
   sentence,
   serverError,
   modelInfo,
+  dynamicModelInfo,
   handDetected,
+  mode = 'static',
+  onModeChange,
   onClear,
   onBackspace,
 }) {
@@ -51,7 +56,15 @@ export default function SignDetectionPanel({
   const stable = prediction?.stable ?? false;
   const latency = prediction?.latency_ms;
 
+  // Word mode cannot predict anything until a full window of frames has been
+  // collected — three seconds at 10 FPS. Without showing that, the UI looks
+  // broken for the first three seconds every time the mode is selected.
+  const buffering = prediction?.buffering === true;
+  const bufferFilled = prediction?.buffer_filled ?? 0;
+  const bufferLength = prediction?.buffer_length ?? 0;
+
   const showingLetter = handDetected && label !== 'nothing' && label !== '—';
+  const unitNoun = mode === 'dynamic' ? 'word' : 'letter';
 
   return (
     <section className="panel flex flex-col gap-5" aria-labelledby="sign-detection-heading">
@@ -73,6 +86,16 @@ export default function SignDetectionPanel({
           {': '}
           {serverError.message}
         </p>
+      )}
+
+      {/* --- which model is doing the work ----------------------------- */}
+      {onModeChange && (
+        <RecognitionModeToggle
+          mode={mode}
+          onChange={onModeChange}
+          staticModelInfo={modelInfo}
+          dynamicModelInfo={dynamicModelInfo}
+        />
       )}
 
       {/* --- current prediction ---------------------------------------- */}
@@ -104,7 +127,11 @@ export default function SignDetectionPanel({
 
             <p className="mt-1 flex justify-between text-sm text-slate-300">
               <span>
-                {showingLetter ? (
+                {buffering ? (
+                  <>
+                    Collecting movement… {bufferFilled}/{bufferLength} frames
+                  </>
+                ) : showingLetter ? (
                   <>
                     Detecting <strong className="text-slate-100">{label}</strong> at{' '}
                     {(confidence * 100).toFixed(0)}%{stable ? ' — locked on' : ' — settling'}
@@ -147,7 +174,9 @@ export default function SignDetectionPanel({
           aria-live="polite"
           aria-atomic="false"
         >
-          {sentence || <span className="text-slate-500">Sign a letter to begin…</span>}
+          {sentence || (
+            <span className="text-slate-500">Sign a {unitNoun} to begin…</span>
+          )}
         </p>
       </div>
 

@@ -98,8 +98,11 @@ BridgeTalk closes that loop, and keeps both directions in one meeting room.
 - Translate sign-language *grammar*. ASL has its own syntax, word order and
   non-manual markers. This is gesture-to-text recognition, not linguistic
   translation.
-- Recognise word-level signs. Model B (dynamic signs) is documented as a
-  stretch goal in [ml/README.md](ml/README.md) and was not trained.
+- Recognise word-level signs *yet*. Model B's pipeline is complete — extraction,
+  signer-disjoint splitting, the LSTM, live sequence buffering, WebSocket
+  routing and a UI toggle, all tested — but it has **not been trained**, because
+  the WLASL dataset is a multi-gigabyte download that has not been fetched. No
+  accuracy is claimed for it anywhere. See [ml/README.md](ml/README.md).
 - Support Indian Sign Language. See [Future enhancements](#19-future-enhancements).
 - Work reliably in poor lighting, at extreme camera angles, or with the hand
   partly out of frame — MediaPipe must see the hand to landmark it.
@@ -543,7 +546,7 @@ Two scripts use the webcam. **Neither writes training data:**
 
 | Dataset | Why not |
 |---|---|
-| **WLASL processed** (`risangbaskoro/wlasl-processed`) | Word-level ASL video, the right data for Model B. Deferred: Model A is the primary deliverable, and realistic CPU accuracy on 20 WLASL glosses is 55–80% with worse live behaviour. Documented as a stretch goal. |
+| **WLASL processed** (`risangbaskoro/wlasl-processed`) | Not rejected — **selected for Model B and not yet downloaded.** It is several gigabytes, and the build brief requires asking before a download that size. The full pipeline that consumes it is written and tested; see [ml/README.md](ml/README.md). It is also the only dataset here carrying `signer_id`, which is what makes a signer-disjoint evaluation possible. |
 | **Google Isolated Sign Language Recognition** (`asl-signs`) | Already in MediaPipe landmark format, which is ideal — but the full download is ~55 GB. Practical only with per-file downloads of a chosen subset. |
 | **Sign Language MNIST** | 28×28 greyscale images. Too low-resolution for MediaPipe to find a hand at all. |
 
@@ -1151,9 +1154,16 @@ Mapped to the SRS:
 
 - **Sentence-level translation.** Move from letter-by-letter to a sequence model
   that outputs phrases, respecting ASL grammar rather than transliterating.
-- **Model B — dynamic word signs.** The LSTM over `(30, 126)` sequences is
-  specified in [ml/README.md](ml/README.md); WLASL-20 is the dataset. Expect
-  55–80% and be honest about it.
+- **Model B — dynamic word signs.** No longer a design sketch: the whole
+  pipeline is built and tested, and what remains is downloading WLASL and
+  running four commands ([ml/README.md](ml/README.md)). Expect 55–80% on a
+  signer-disjoint split and be honest about it — and expect live performance
+  below that, because the model is trained on segmented clips and used on an
+  unsegmented stream.
+- **Continuous sign segmentation.** The single biggest lever on Model B's live
+  accuracy, and an open research problem. Today `sequence.py` uses two
+  heuristics: a run of hand-free frames ends a sign, and mostly-empty windows
+  are not classified. Neither helps a signer who does not pause.
 - **Indian Sign Language.** The INCLUDE and ISL-CSLTR datasets. The whole
   pipeline is language-agnostic — only the training data and labels change,
   which is a direct benefit of classifying landmarks rather than pixels.

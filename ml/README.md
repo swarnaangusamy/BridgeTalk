@@ -40,15 +40,16 @@ ml/data/raw/                       images and videos              (gitignored)
   │  extract_landmarks_images.py   OpenCV + MediaPipe IMAGE mode → 21×3 points
   │  extract_landmarks_video.py    MediaPipe VIDEO mode → (30, 126) sequences
   ▼
-ml/data/processed/                 landmark CSV / NPY             (gitignored)
-  │  preprocess.py                 normalise · augment · split by source file
+ml/data/processed/                 landmark CSV / NPZ             (gitignored)
+  │  preprocess.py                 balance · augment · split by capture order
+  │  preprocess_dynamic.py         augment · split by SIGNER (holds out people)
   ▼
-  │  train_static.py               MLP     (63,)      → 29 classes
-  │  train_dynamic.py              LSTM    (30, 126)  → 20 classes
+  │  train_static.py               MLP     (63,)      → 28 classes
+  │  train_dynamic.py              LSTM    (30, 126)  → 20 glosses
   ▼
 ml/models/                         .keras + labels.json + metadata.json
   │  evaluate.py                   classification report + confusion matrix
-  ▼
+  ▼                                (one script, both models — see --prefix)
 docs/images/                       plots committed to the repo
 ```
 
@@ -116,12 +117,66 @@ will be *worse* than that, because the dataset's lighting, cameras and framing
 differ from ours. That domain gap is a well-known and publishable limitation,
 not a project failure — it belongs in the failure-analysis section, not hidden.
 
-**Status: not trained.** Model A is the complete, defensible MVP and reaches
-90.5% on held-out data. Model B's realistic ceiling on CPU is 55-80% with worse
-live behaviour, so shipping it as a live demo would weaken the presentation
-rather than strengthen it. The architecture and dataset choice are specified
-above so the work can be picked up directly; the recommendation is to demo
-Model A and present Model B as documented work-in-progress.
+### Status: pipeline complete, model not yet trained
+
+Every piece of Model B is written, tested and wired end to end:
+
+| | |
+|---|---|
+| `extract_landmarks_video.py` | WLASL clips → `(30, 126)` sequences |
+| `preprocess_dynamic.py` | signer-disjoint split + sequence augmentation |
+| `train_dynamic.py` | the LSTM above, with class weighting |
+| `evaluate.py --prefix dyn_` | same metrics and confusion analysis as Model A |
+| `backend/app/ml/sequence.py` | live sliding-window buffer |
+| `backend/app/ml/predictor.py` | second model instance, same version guard |
+| `/ws/predict` `mode: "dynamic"` | routed, with buffering progress reported |
+| `RecognitionModeToggle.jsx` | UI switch, disabled when no model is loaded |
+
+**What is missing is the dataset, not the code.** WLASL processed is several
+gigabytes and the build brief requires asking before a download that size, so
+it has not been fetched. Once it is present, the four commands under "Running
+the pipeline" below produce a trained Model B with no further changes.
+
+**No accuracy is reported here, because none has been measured.** The 55–80%
+figure above is what the literature reports for comparable WLASL-20 setups, not
+a result from this repository. It is an expectation to test, and quoting it as
+though it were our own number would be exactly the kind of claim this project
+has otherwise avoided.
+
+**The recommendation still stands: demo Model A.** It reaches 90.5% on held-out
+data and its live behaviour is good. Model B is the more interesting engineering
+story — sequences, masking, signer-disjoint evaluation — and it is worth
+presenting as built-and-ready, but a live demo of a 60%-accurate model beside a
+90%-accurate one weakens the presentation rather than strengthening it.
+
+### The one thing Model B does better than Model A
+
+Model A's honest limitation is that ASL Alphabet carries no signer metadata, so
+its test split measures "the same hands, later frames".
+
+**WLASL records `signer_id`,** so `preprocess_dynamic.py` splits by holding out
+entire people. Its test accuracy therefore answers "will this work for someone
+new?" — the question a reviewer actually cares about — rather than "can it
+recognise frames near ones it memorised?". Expect a lower number than a random
+split would give, and expect the gap to be large. That gap is the measurement
+working, not a bug to tune away.
+
+`--split-strategy official` and `--split-strategy random` are provided for
+comparison, and the random one is explicitly labelled as leaky.
+
+### Live inference is harder than the test split, for a structural reason
+
+Model B is trained on **segmented** clips — each one trimmed to a single sign by
+WLASL's own frame metadata. Live, landmarks arrive as an unbroken stream and
+nothing announces where a sign starts. A sliding window can straddle two signs,
+or land on the rest position between them, and the model was shown neither
+during training.
+
+Continuous sign segmentation is an open research problem. `sequence.py` applies
+the two cheap heuristics that recover most of the benefit — a run of hand-free
+frames is treated as a boundary, and a window that is mostly empty is never
+classified — and neither helps a signer who moves continuously without pausing.
+That limitation is stated rather than papered over.
 
 ---
 
@@ -218,6 +273,29 @@ python ml/scripts/test_realtime.py                       # live webcam check
 ```
 
 Use `--limit-per-class 500` for a fast pipeline test at lower accuracy.
+
+### Model B (once WLASL is downloaded)
+
+```bash
+python ml/scripts/download_datasets.py --dataset dynamic --verify
+python ml/scripts/extract_landmarks_video.py --num-glosses 20   # video decode, slow
+python ml/scripts/preprocess_dynamic.py                        # signer-disjoint split
+python ml/scripts/train_dynamic.py
+python ml/scripts/evaluate.py \
+    --model ml/models/dynamic_model.keras \
+    --labels ml/models/labels_dynamic.json \
+    --prefix dyn_ --report dynamic_evaluation_report.json \
+    --history dynamic_training_history.json --image-tag _dynamic
+```
+
+`extract_landmarks_video.py --dry-run` processes three clips per gloss and
+writes nothing, which is the fast way to confirm the dataset is laid out
+correctly before committing to a full extraction run.
+
+Note that `evaluate.py` serves both models rather than there being a second
+copy of it. The metrics, confusion matrix and failure analysis are identical
+between them; only the arrays, labels and output filenames differ, and a
+duplicate script would have been a guarantee that the two drift apart.
 
 ### What extraction reports, and why it matters
 

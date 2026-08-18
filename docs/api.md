@@ -185,7 +185,7 @@ Carries landmark frames from the browser to the model, and predictions back.
 | Field | Type | Notes |
 |---|---|---|
 | `type` | `"landmarks"` | Message discriminator |
-| `mode` | `"static"` \| `"dynamic"` | Which model to route to |
+| `mode` | `"static"` \| `"dynamic"` | Which model to route to. Anything else is an `INVALID_MESSAGE` — never a silent fallback |
 | `timestamp` | int (ms) | Client clock; used to compute `latency_ms` |
 | `hands` | array | 0, 1 or 2 entries. Empty means no hand in frame. |
 | `hands[].handedness` | `"Left"` \| `"Right"` | From MediaPipe, used for hand ordering |
@@ -193,6 +193,11 @@ Carries landmark frames from the browser to the model, and predictions back.
 
 Sent at roughly **10 FPS**, throttled on the client — not once per
 `requestAnimationFrame`.
+
+**`mode` may change between messages.** Switching mid-stream hands the
+accumulated sentence to the other mode's smoother and discards any partial
+sequence window — the user keeps writing one continuous piece of text, but a
+half-collected word sign is not carried across into a different model.
 
 ### Server → client
 
@@ -212,8 +217,53 @@ Sent at roughly **10 FPS**, throttled on the client — not once per
 | `label` | Argmax class for this frame |
 | `confidence` | Softmax probability, 0–1 |
 | `stable` | `true` once the smoothing layer accepts the label (see below) |
+| `mode` | Which model produced this — `"static"` or `"dynamic"` |
 | `sentence` | Accumulated text for this connection |
 | `latency_ms` | Server receive → send, surfaced in the UI |
+
+### Dynamic mode — extra fields, and why most frames predict nothing
+
+In `dynamic` mode a prediction needs a **full window of 30 frames** — three
+seconds at 10 FPS — and only every third frame is then classified. Frames that
+produce no prediction still return a message, carrying the buffer's state:
+
+```json
+{
+  "type": "prediction",
+  "mode": "dynamic",
+  "label": "nothing",
+  "confidence": 0.0,
+  "stable": false,
+  "buffering": true,
+  "buffer_filled": 12,
+  "buffer_length": 30,
+  "sentence": "",
+  "latency_ms": 0.2
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `buffering` | `true` when no prediction was made for this frame |
+| `buffer_filled` / `buffer_length` | Real progress, so the UI can show "collecting movement… 12/30" instead of looking broken for three seconds |
+
+Two rules decide whether a full window is classified at all:
+
+1. **Hand-free frames for `DYNAMIC_RESET_FRAMES` (8) clear the buffer.** People
+   drop their hands between signs, so this gives real segmentation for free
+   whenever they do.
+2. **A window under `DYNAMIC_MIN_DETECTION_RATE` (30%) hand is never
+   classified.** The model must answer with one of its glosses whatever it is
+   shown, so asking it about a mostly-empty window produces a confident answer
+   with no basis behind it.
+
+Neither rule helps a signer who moves continuously from one sign into the next.
+Continuous sign segmentation is an open research problem, and this is stated as
+a known limitation rather than hidden.
+
+Word signs also use **two hands** (126 features per frame, left slot then
+right), where fingerspelling uses one (63). The client must therefore track two
+hands in this mode, or half of every input vector is zero.
 
 Errors use a separate shape:
 
@@ -227,9 +277,23 @@ Errors use a separate shape:
 
 | Code | Meaning |
 |---|---|
-| `MODEL_NOT_LOADED` | No `.keras` file, or it failed to load at startup |
+| `MODEL_NOT_LOADED` | No `.keras` file, or it failed to load at startup. In `dynamic` mode this is the **expected** response on a deployment without Model B, which is a supported configuration rather than a fault |
 | `NORMALIZATION_VERSION_MISMATCH` | Model was trained with a different normalisation |
-| `INVALID_MESSAGE` | Malformed JSON or wrong landmark shape |
+| `INVALID_MESSAGE` | Malformed JSON, wrong landmark shape, or an unrecognised `mode` |
+
+The `connected` frame carries a `dynamic_model` block alongside `model`, so a
+client can tell whether word-sign mode is worth offering:
+
+```json
+{ "type": "connected",
+  "model":         { "mode": "static",  "loaded": true,  "classes": 28, "val_accuracy": 0.9404 },
+  "dynamic_model": { "mode": "dynamic", "loaded": false, "error": "Missing dynamic_model.keras. Train the model first: python ml/scripts/train_dynamic.py" },
+  "dynamic_config": { "length": 30, "stride": 3, "confidence_threshold": 0.7, "cooldown_ms": 2500 } }
+```
+
+The UI disables the word-sign toggle and shows that `error` verbatim, rather
+than hiding the option. A missing feature that explains itself is far easier to
+work with than one that silently is not there.
 
 ### Smoothing — why `stable` exists
 
@@ -245,6 +309,20 @@ promoted to `stable` only after passing, in order:
    close the current word.
 
 All four are configurable in `.env`.
+
+**Dynamic mode uses different values**, from the `DYNAMIC_*` keys: threshold
+0.70, cooldown 2500 ms, and a 5-frame window needing 3 votes. Those are not
+arbitrary. Twenty word classes trained on roughly twenty clips each produce much
+flatter softmax output than 28 letter classes trained on thousands, so 0.80
+would reject nearly everything; a word sign takes one to two seconds, so a
+1.5 s debounce could fire twice inside one sign; and successive dynamic
+predictions come from windows overlapping by 29 frames out of 30, so ten votes
+would be nearly the same evidence counted ten times rather than independent
+confirmation.
+
+Word signs are also joined with **spaces** during sentence assembly, where
+letters concatenate. `"book"` then `"help"` must produce `book help`, not
+`bookhelp`.
 
 Implementation: [`backend/app/ml/smoothing.py`](../backend/app/ml/smoothing.py), tested against a synthetic prediction stream in [`test_smoothing.py`](../backend/tests/test_smoothing.py).
 

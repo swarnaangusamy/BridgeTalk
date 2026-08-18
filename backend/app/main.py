@@ -17,7 +17,7 @@ from app import __version__
 from app.api import auth, meetings, transcripts
 from app.config import settings
 from app.database import engine, init_db
-from app.ml.predictor import predictor
+from app.ml.predictor import dynamic_predictor, predictor
 from app.ws import inference, signaling
 from app.ws.connection_manager import inference_manager, signaling_manager
 
@@ -68,6 +68,17 @@ async def lifespan(app: FastAPI):
         logger.info("Sign recognition ready")
     else:
         logger.warning("Sign recognition unavailable — %s", predictor.load_error)
+
+    # Model B is a stretch goal, so its absence is logged at INFO rather than
+    # WARNING. A deployment with only Model A is the expected configuration,
+    # not a degraded one, and logging it as a warning would train the reader to
+    # ignore warnings.
+    if dynamic_predictor.load():
+        logger.info(
+            "Word-sign recognition ready — %d glosses", len(dynamic_predictor.class_names)
+        )
+    else:
+        logger.info("Word-sign recognition not available — %s", dynamic_predictor.load_error)
 
     yield
 
@@ -135,6 +146,7 @@ def health() -> dict:
         # Model status here means the frontend can explain *why* sign detection
         # is unavailable instead of just failing to produce predictions.
         "model": predictor.describe(),
+        "dynamic_model": dynamic_predictor.describe(),
         "websockets": {
             "inference": inference_manager.stats(),
             "signaling": signaling_manager.stats(),

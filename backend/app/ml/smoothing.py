@@ -78,6 +78,25 @@ class SmoothingConfig:
         if not 0.0 <= self.confidence_threshold <= 1.0:
             raise ValueError("confidence_threshold must be between 0 and 1")
 
+    @classmethod
+    def for_dynamic(cls) -> "SmoothingConfig":
+        """Settings tuned for word signs rather than letters.
+
+        The four numbers differ for reasons explained in config.py, but the one
+        worth restating here is the majority window. Dynamic predictions come
+        from sliding windows that overlap by 29 frames out of 30, so successive
+        votes are nearly the same evidence counted repeatedly. Demanding 7 of 10
+        of them would delay every word by most of a second while adding almost
+        no independent confirmation.
+        """
+        return cls(
+            confidence_threshold=settings.dynamic_confidence_threshold,
+            cooldown_ms=settings.dynamic_cooldown_ms,
+            majority_window=settings.dynamic_majority_window,
+            majority_min=settings.dynamic_majority_min,
+            neutral_reset_frames=settings.dynamic_reset_frames,
+        )
+
 
 @dataclass
 class SmoothingResult:
@@ -98,8 +117,17 @@ class PredictionSmoother:
     interleaved into one sentence.
     """
 
-    def __init__(self, config: Optional[SmoothingConfig] = None) -> None:
+    def __init__(
+        self,
+        config: Optional[SmoothingConfig] = None,
+        word_mode: bool = False,
+    ) -> None:
         self.config = config or SmoothingConfig()
+        # Letters concatenate ("H" + "I" = "HI"); words must not ("book" +
+        # "help" = "bookhelp"). The separator is the only difference between
+        # assembling fingerspelling and assembling word signs, so it is a flag
+        # rather than a second smoother class.
+        self.word_mode = word_mode
         self._recent: deque[Optional[str]] = deque(maxlen=self.config.majority_window)
         self._sentence: str = ""
         self._last_emitted: Optional[str] = None
@@ -219,6 +247,12 @@ class PredictionSmoother:
                 self._sentence += " "
         elif label == DELETE_LABEL:
             self._sentence = self._sentence[:-1]
+        elif self.word_mode:
+            # Word signs are whole words, so they need separating. Backspace in
+            # this mode still removes one character, which is deliberate: it
+            # lets a mis-recognised word be corrected by typing rather than
+            # forcing the whole word to be deleted.
+            self._sentence += label if not self._sentence else f" {label}"
         else:
             self._sentence += label
 
@@ -251,3 +285,21 @@ class PredictionSmoother:
         """Remove the last character, for the UI's Backspace button."""
         self._sentence = self._sentence[:-1]
         return self._sentence
+
+    def adopt(self, sentence: str) -> None:
+        """Take over an existing sentence, discarding any vote history.
+
+        Used when the user switches between fingerspelling and word signs
+        mid-conversation. Each mode has its own smoother — they need different
+        thresholds and different debounce timing — but the person is writing
+        one sentence, and having their text vanish because they changed input
+        method would be indefensible.
+
+        The vote window is deliberately NOT carried across. Votes cast by the
+        letter model mean nothing to the word model, and letting them survive
+        the switch would let a letter be emitted by the wrong smoother.
+        """
+        self._sentence = sentence[-MAX_SENTENCE_LENGTH:]
+        self._recent.clear()
+        self._last_emitted = None
+        self._neutral_streak = 0

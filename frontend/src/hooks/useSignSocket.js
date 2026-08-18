@@ -35,6 +35,10 @@ export function useSignSocket({ meetingCode, enabled = true, onSubtitle } = {}) 
   const [sentence, setSentence] = useState('');
   const [serverError, setServerError] = useState(null);
   const [modelInfo, setModelInfo] = useState(null);
+  // Model B is a stretch goal and a backend without one is a supported
+  // configuration, so the UI has to be told whether the word-sign toggle is
+  // worth offering at all rather than assuming it works.
+  const [dynamicModelInfo, setDynamicModelInfo] = useState(null);
 
   // Kept in a ref so a changing callback identity does not tear down and
   // rebuild the socket on every parent render.
@@ -77,6 +81,7 @@ export function useSignSocket({ meetingCode, enabled = true, onSubtitle } = {}) 
       switch (message.type) {
         case 'connected':
           setModelInfo(message.model ?? null);
+          setDynamicModelInfo(message.dynamic_model ?? null);
           break;
 
         case 'prediction':
@@ -210,6 +215,7 @@ export function useSignSocket({ meetingCode, enabled = true, onSubtitle } = {}) 
     sentence,
     serverError,
     modelInfo,
+    dynamicModelInfo,
     sendLandmarks,
     sendSpeech,
     clearSentence,

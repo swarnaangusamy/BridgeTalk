@@ -1,12 +1,25 @@
-"""Loads the trained Keras model and runs inference on landmark vectors.
+"""Loads the trained Keras models and runs inference on landmark data.
 
-The model is loaded **once, at application startup**, and held in memory for the
-process lifetime. Loading it per request would add hundreds of milliseconds to
-a system whose entire selling point is sub-second response.
+Models are loaded **once, at application startup**, and held in memory for the
+process lifetime. Loading per request would add hundreds of milliseconds to a
+system whose entire selling point is sub-second response.
+
+TWO MODELS, ONE CLASS
+---------------------
+BridgeTalk ships two classifiers with genuinely different shapes:
+
+  * **Model A (static)** — 63 floats of one hand → a fingerspelled letter.
+  * **Model B (dynamic)** — a (30, 126) sequence of two-handed frames → a word.
+
+They differ in input shape, in which files they read, and in how good they are.
+They do **not** differ in how they must be loaded, version-guarded or failed
+safely, so that logic lives in one class configured twice rather than being
+copied. A second copy would be the obvious place for the version guard to
+quietly go missing from one of them.
 
 THE VERSION GUARD
 -----------------
-`metadata.json` records the `normalization_version` the model was trained with.
+Each model's metadata records the `normalization_version` it was trained with.
 If that does not match the version in the running code, this module **refuses
 to load the model**.
 
@@ -28,7 +41,11 @@ from typing import Any, Optional
 import numpy as np
 
 from app.config import settings
-from app.ml.normalization import NORMALIZATION_VERSION, SINGLE_HAND_FEATURES
+from app.ml.normalization import (
+    NORMALIZATION_VERSION,
+    SINGLE_HAND_FEATURES,
+    TWO_HAND_FEATURES,
+)
 
 logger = logging.getLogger("bridgetalk.predictor")
 
@@ -38,15 +55,34 @@ class ModelNotLoadedError(RuntimeError):
 
 
 class SignPredictor:
-    """Wraps the static (fingerspelling) classifier.
+    """Wraps one trained classifier.
 
     Deliberately tolerant of a missing model: the API must still start so that
-    auth, meetings and transcripts work while someone is still training the
-    model. Attempting to *predict* without one raises, and the WebSocket turns
-    that into a clear MODEL_NOT_LOADED message rather than a 500.
+    auth, meetings and transcripts work while someone is still training. This
+    matters more for Model B than Model A — the dynamic model is a stretch goal
+    and a deployment without one is a normal, supported state, not an error.
+
+    Attempting to *predict* without a model raises, and the WebSocket turns that
+    into a clear MODEL_NOT_LOADED message rather than a 500.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        mode: str,
+        model_path: str,
+        labels_path: str,
+        metadata_path: str,
+        input_shape: tuple[int, ...],
+        train_command: str,
+    ) -> None:
+        self.mode = mode
+        self._model_path = model_path
+        self._labels_path = labels_path
+        self._metadata_path = metadata_path
+        self.input_shape = input_shape
+        self._train_command = train_command
+
         self._model: Any = None
         self.class_names: list[str] = []
         self.metadata: dict[str, Any] = {}
@@ -66,17 +102,17 @@ class SignPredictor:
         Never raises: a failure here must not stop the API from starting. The
         reason is recorded in `load_error` and surfaced through /health.
         """
-        model_path = settings.resolve_path(settings.static_model_path)
-        labels_path = settings.resolve_path(settings.labels_path)
-        metadata_path = settings.resolve_path(settings.model_metadata_path)
+        model_path: Path = settings.resolve_path(self._model_path)
+        labels_path: Path = settings.resolve_path(self._labels_path)
+        metadata_path: Path = settings.resolve_path(self._metadata_path)
 
         missing = [path for path in (model_path, labels_path) if not path.is_file()]
         if missing:
             self.load_error = (
                 f"Missing {', '.join(path.name for path in missing)}. "
-                "Train the model first: python ml/scripts/train_static.py"
+                f"Train the model first: {self._train_command}"
             )
-            logger.warning("Sign model not loaded — %s", self.load_error)
+            logger.warning("%s model not loaded — %s", self.mode, self.load_error)
             return False
 
         # --- version guard, before spending time loading weights ------------
@@ -84,7 +120,7 @@ class SignPredictor:
             try:
                 self.metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
             except json.JSONDecodeError as exc:
-                self.load_error = f"metadata.json is not valid JSON: {exc}"
+                self.load_error = f"{metadata_path.name} is not valid JSON: {exc}"
                 logger.error(self.load_error)
                 return False
 
@@ -99,7 +135,11 @@ class SignPredictor:
                 logger.error(self.load_error)
                 return False
         else:
-            logger.warning("No metadata.json — cannot verify normalisation version")
+            logger.warning(
+                "No %s — cannot verify normalisation version for the %s model",
+                metadata_path.name,
+                self.mode,
+            )
 
         try:
             labels_data = json.loads(labels_path.read_text(encoding="utf-8"))
@@ -121,13 +161,26 @@ class SignPredictor:
             return False
 
         # --- shape sanity ---------------------------------------------------
-        # A model whose output width disagrees with labels.json would silently
-        # map probabilities to the wrong letters.
+        # A model whose output width disagrees with its labels file would
+        # silently map probabilities to the wrong classes.
         output_classes = int(self._model.output_shape[-1])
         if output_classes != len(self.class_names):
             self.load_error = (
-                f"Model outputs {output_classes} classes but labels.json lists "
+                f"Model outputs {output_classes} classes but {labels_path.name} lists "
                 f"{len(self.class_names)}. These files are from different runs."
+            )
+            logger.error(self.load_error)
+            self._model = None
+            return False
+
+        # Input shape is checked too, not just output width. Loading the static
+        # model into the dynamic slot would otherwise fail much later, on the
+        # first frame, as a confusing shape error inside TensorFlow.
+        expected_input = tuple(self._model.input_shape[1:])
+        if expected_input != self.input_shape:
+            self.load_error = (
+                f"Model expects input {expected_input} but the {self.mode} pipeline "
+                f"produces {self.input_shape}. This looks like the wrong model file."
             )
             logger.error(self.load_error)
             self._model = None
@@ -135,7 +188,8 @@ class SignPredictor:
 
         self.load_error = None
         logger.info(
-            "Sign model loaded in %.2fs — %d classes, val accuracy %s",
+            "%s model loaded in %.2fs — %d classes, val accuracy %s",
+            self.mode.capitalize(),
             elapsed,
             len(self.class_names),
             self.metadata.get("metrics", {}).get("val_accuracy", "unknown"),
@@ -145,10 +199,8 @@ class SignPredictor:
         # Keras traces the graph and can take 100ms+; paying that here means
         # the first real prediction is not anomalously slow and does not skew
         # the latency figure shown in the UI.
-        self._model(
-            np.zeros((1, SINGLE_HAND_FEATURES), dtype=np.float32), training=False
-        )
-        logger.info("Sign model warmed up")
+        self._model(np.zeros((1, *self.input_shape), dtype=np.float32), training=False)
+        logger.info("%s model warmed up", self.mode.capitalize())
 
         return True
 
@@ -157,34 +209,38 @@ class SignPredictor:
     # ------------------------------------------------------------------ #
 
     def predict(self, features: np.ndarray) -> tuple[str, float, np.ndarray]:
-        """Classify one normalised 63-float landmark vector.
+        """Classify one sample.
+
+        Args:
+            features: shape (63,) for the static model, (30, 126) for the
+                dynamic one — a single sample, without a batch dimension.
 
         Returns:
             (label, confidence, full probability vector)
 
         Raises:
             ModelNotLoadedError: if no model is available.
-            ValueError: if the feature vector is the wrong shape.
+            ValueError: if the input is the wrong shape.
         """
         if self._model is None:
             raise ModelNotLoadedError(self.load_error or "No model loaded")
 
         features = np.asarray(features, dtype=np.float32)
 
-        if features.shape != (SINGLE_HAND_FEATURES,):
+        if features.shape != self.input_shape:
             raise ValueError(
-                f"Expected {SINGLE_HAND_FEATURES} features, got shape {features.shape}"
+                f"Expected input of shape {self.input_shape}, got {features.shape}"
             )
 
         # Calling the model directly, NOT model.predict().
         #
         # `predict()` is built for batches: it constructs a tf.data pipeline,
         # sets up callbacks and dispatches through the training loop machinery.
-        # For one 63-float sample that overhead is roughly 50ms, which utterly
-        # dominates the ~1ms the network itself needs — and it lands directly in
-        # the latency number the UI shows. Calling the model as a function skips
-        # all of it. Measured on this project: 53ms median down to under 2ms.
-        probabilities = self._model(features[None, :], training=False).numpy()[0]
+        # For one sample that overhead is roughly 50ms, which utterly dominates
+        # the ~1ms the network itself needs — and it lands directly in the
+        # latency number the UI shows. Calling the model as a function skips all
+        # of it. Measured on this project: 53ms median down to under 2ms.
+        probabilities = self._model(features[None, ...], training=False).numpy()[0]
         index = int(probabilities.argmax())
 
         return self.class_names[index], float(probabilities[index]), probabilities
@@ -192,15 +248,34 @@ class SignPredictor:
     def describe(self) -> dict[str, Any]:
         """Model status for /health and the frontend's status panel."""
         return {
+            "mode": self.mode,
             "loaded": self.is_loaded,
             "error": self.load_error,
             "classes": len(self.class_names),
+            "class_names": self.class_names,
             "normalization_version": NORMALIZATION_VERSION,
             "val_accuracy": self.metadata.get("metrics", {}).get("val_accuracy"),
             "trained_at": self.metadata.get("trained_at"),
             "source_dataset": self.metadata.get("source_dataset"),
+            "signer_disjoint": self.metadata.get("signer_disjoint"),
         }
 
 
-# One instance per process, loaded during the FastAPI lifespan startup.
-predictor = SignPredictor()
+# One instance of each per process, loaded during the FastAPI lifespan startup.
+predictor = SignPredictor(
+    mode="static",
+    model_path=settings.static_model_path,
+    labels_path=settings.labels_path,
+    metadata_path=settings.model_metadata_path,
+    input_shape=(SINGLE_HAND_FEATURES,),
+    train_command="python ml/scripts/train_static.py",
+)
+
+dynamic_predictor = SignPredictor(
+    mode="dynamic",
+    model_path=settings.dynamic_model_path,
+    labels_path=settings.dynamic_labels_path,
+    metadata_path=settings.dynamic_metadata_path,
+    input_shape=(settings.sequence_length, TWO_HAND_FEATURES),
+    train_command="python ml/scripts/train_dynamic.py",
+)

@@ -129,7 +129,57 @@ vote spans 10 frames, which at 10 Hz is a one-second decision — about how long
 a person holds a letter. Sending at 60 Hz would sextuple traffic and server
 load to reach the same conclusion a second later.
 
-### 3.2 Speech → text
+### 3.2 Word signs → text (Model B)
+
+The same socket, the same landmarks, a different shape of question.
+
+```mermaid
+sequenceDiagram
+    participant WS as useSignSocket
+    participant SRV as /ws/predict
+    participant BUF as SequenceBuffer
+    participant M as LSTM
+    participant SM as smoothing.py
+
+    loop every ~100 ms, mode:"dynamic"
+        WS->>SRV: {hands:[left, right]}
+        SRV->>SRV: normalize_hands -> 126 floats
+        SRV->>BUF: push(frame)
+
+        alt window not full, or between strides
+            BUF-->>SRV: nothing
+            SRV-->>WS: {buffering:true, filled:12/30}
+        else hands gone for 8 frames
+            BUF->>BUF: reset — sign boundary
+            SRV-->>WS: {buffering:true, filled:0/30}
+        else window full and >30% hand
+            BUF-->>SRV: (30, 126)
+            SRV->>M: model(window)
+            M-->>SRV: gloss + softmax
+            SRV->>SM: push(gloss, confidence)
+            SM-->>SRV: stable? sentence?
+            SRV-->>WS: {prediction, sentence}
+        end
+    end
+```
+
+Three differences from the static path are worth stating, because each one is a
+decision rather than an accident:
+
+1. **Two hands, not one.** Word signs frequently use both, so features are 126
+   wide with a slot per hand, fixed by handedness. The client tracks two hands
+   in this mode or half of every input is zero.
+2. **Most frames produce no prediction.** A window needs 30 frames — three
+   seconds at 10 FPS — and only every third frame is then classified. Frames
+   that predict nothing still report buffer progress, so the UI can show real
+   filling instead of appearing broken.
+3. **The training/inference mismatch is managed, not solved.** Model B is
+   trained on segmented clips; live landmarks arrive as an unbroken stream. The
+   buffer applies two heuristics — a run of hand-free frames is a boundary, and
+   a mostly-empty window is never classified — and neither helps a signer who
+   moves continuously without pausing. See `backend/app/ml/sequence.py`.
+
+### 3.3 Speech → text
 
 The hearing participant's browser runs the Web Speech API locally
 (`useSpeechToText`). Interim results update their own caption immediately and
@@ -141,7 +191,7 @@ Speech travels over the **inference** socket, not the signalling one. That is
 deliberate: this is the meeting's *text* channel, both directions belong
 together, and a dropped video call must not take the captions down with it.
 
-### 3.3 Call establishment (WebRTC signalling)
+### 3.4 Call establishment (WebRTC signalling)
 
 ```mermaid
 sequenceDiagram
@@ -190,7 +240,7 @@ change needs no backend change at all.
 app/main.py          FastAPI instance, CORS, router registration, model warm-up
 ├── api/             HTTP routers — thin; validate, delegate, serialise
 ├── ws/              WebSocket endpoints + connection manager
-├── ml/              predictor · normalization · smoothing
+├── ml/              predictor · normalization · smoothing · sequence
 │                    (pure functions where possible, so they are unit-testable
 │                     without a running server)
 ├── models/          SQLAlchemy ORM — the only place that knows SQL exists
@@ -211,14 +261,18 @@ stops a `password_hash` column accidentally appearing in a JSON response.
 The constraint is stated here because it shapes several files at once. Full
 explanation in [ml/README.md](ml/README.md#landmark-normalisation--the-critical-detail).
 
-The same normalisation procedure is implemented three times:
+The same normalisation procedure is implemented **twice**, which is a deliberate
+departure from the original specification's three (training, backend, browser).
+Writing the same arithmetic twice in Python would manufacture exactly the drift
+the requirement exists to prevent, so the training scripts import the backend's
+implementation instead:
 
 | Implementation | Runs | Purpose |
 |---|---|---|
 | `backend/app/ml/normalization.py` | Offline **and** per inference request | The single Python implementation. The ml/ training scripts import it rather than reimplementing it, so training and inference are identical by construction |
 | `frontend/src/utils/landmarkUtils.js` | In the browser | The one boundary that can genuinely diverge, and what the parity test guards |
 
-If these three disagree by even a small amount, training accuracy stays at 97%
+If these disagree by even a small amount, training accuracy stays at 97%
 while live predictions become noise — the classic silent failure of this kind of
 project. `backend/tests/` therefore contains a parity test that pushes the same
 raw landmark array through the Python and JavaScript implementations and asserts
@@ -255,6 +309,9 @@ pointing at an id that no longer exists.
 |---|---|---|
 | MySQL unreachable at startup | `lifespan` probe in `main.py` | Refuses to start, logs the fix. A server that starts and 500s every request is far harder to diagnose |
 | No trained model | `predictor.load()` | **Starts anyway** — auth, meetings and transcripts still work. The socket reports `MODEL_NOT_LOADED` |
+| No **dynamic** model | `dynamic_predictor.load()` | Logged at INFO, not WARNING — a deployment with only Model A is the expected configuration. The UI disables the word-sign toggle and shows why |
+| Wrong model file in a slot | `predictor.load()` input-shape check | Refuses to load. Without it, loading the 63-input model into the dynamic slot would surface much later as a confusing TensorFlow shape error on the first frame |
+| Dynamic window mostly empty | `SequenceBuffer` detection rate | No prediction attempted. The model would otherwise answer confidently about a window containing almost no hand |
 | Model normalisation version mismatch | `predictor.load()` | **Refuses to load.** A mismatched model returns confident nonsense with nothing in the logs |
 | Camera permission denied | `getUserMedia` error name | Named message per cause (`NotAllowedError`, `NotReadableError`, `NotFoundError`) with the actual fix |
 | No hand in frame | Empty `hands` array | Neutral state emitted **without calling the model** — there are no landmarks to classify |

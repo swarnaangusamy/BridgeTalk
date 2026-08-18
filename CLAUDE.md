@@ -47,11 +47,16 @@ When this file and the master prompt disagree, the master prompt wins.
    client-side; only 21×3 float coordinates (a few hundred bytes) go over the
    WebSocket. This is a core privacy/bandwidth claim of the design and must stay
    visibly true in the code.
-3. **Normalisation is implemented three times and must agree to 1e-6:**
-   `ml/scripts/preprocess.py`, `backend/app/ml/normalization.py`,
-   `frontend/src/utils/landmarkUtils.js`. A parity test in `backend/tests/`
-   guards this. A mismatch here is the classic silent bug: 97% training
-   accuracy, garbage live predictions.
+3. **Normalisation is implemented twice and must agree to 1e-6:**
+   `backend/app/ml/normalization.py` and
+   `frontend/src/utils/landmarkUtils.js`. This is a deliberate departure from
+   the master prompt's "three times" — every `ml/scripts/*` file *imports* the
+   backend implementation rather than reimplementing it, because a second
+   Python copy would manufacture exactly the drift the rule exists to prevent.
+   `backend/tests/test_normalization_parity.py` guards the one boundary that
+   can genuinely diverge, and was verified to fail when a 0.001% divergence is
+   injected. A mismatch here is the classic silent bug: 97% training accuracy,
+   garbage live predictions.
 4. **CPU only.** Every model must train on CPU in under 30 minutes.
 5. **No secrets in git.** Real values live in `.env` (gitignored).
    `.env.example` carries placeholders only.
@@ -63,6 +68,7 @@ When this file and the master prompt disagree, the master prompt wins.
 
 ```
 backend/    FastAPI app (api/, ws/, ml/, models/, schemas/, core/) + tests
+            ml/ holds predictor · normalization · smoothing · sequence
 ml/         dataset scripts, training scripts, saved .keras models
 frontend/   React + Vite client
 database/   schema.sql, seed.sql
@@ -89,8 +95,10 @@ source .venv/bin/activate && pytest backend/tests -v
 - [x] Phase 0 — scaffold, docs skeleton, setup scripts
 - [x] Phase 1 — backend foundation, MySQL, JWT auth
 - [x] Phase 2 — meetings & transcripts API
-- [ ] Phase 3 — dataset acquisition & landmark extraction
-- [ ] Phase 4 — model training + evaluation
+- [x] Phase 3 — dataset acquisition & landmark extraction
+- [x] Phase 4 — model training + evaluation (Model A trained: 90.5% test.
+      Model B pipeline complete and tested but **not trained** — WLASL is a
+      multi-GB download that has not been fetched. No accuracy is claimed.)
 - [x] Phase 5 — real-time inference over WebSocket
 - [x] Phase 6 — meeting room UI, WebRTC, speech-to-text
 - [x] Phase 7 — Interview Mode, polish, documentation

@@ -179,23 +179,50 @@ def main() -> int:
     )
     parser.add_argument("--split", choices=["test", "val"], default="test")
     parser.add_argument("--model", type=Path, default=MODELS_DIR / "static_model.keras")
+    # The remaining four arguments are what let one evaluation path serve both
+    # models. Model B differs only in which arrays and labels it reads and where
+    # it writes; the metrics, the confusion matrix and the failure analysis are
+    # identical, and duplicating them into a second script would guarantee the
+    # two drift apart.
+    parser.add_argument("--labels", type=Path, default=MODELS_DIR / "labels.json")
+    parser.add_argument("--prefix", default="",
+                        help="Array-name prefix, e.g. 'dyn_' for X_dyn_test.npy")
+    parser.add_argument("--report", default="evaluation_report.json")
+    parser.add_argument("--history", default="training_history.json")
+    parser.add_argument("--image-tag", default="",
+                        help="Suffix for figure filenames, e.g. '_dynamic'")
     args = parser.parse_args()
 
     if not args.model.is_file():
-        print(f"ERROR: {args.model} not found. Run train_static.py first.", file=sys.stderr)
+        print(f"ERROR: {args.model} not found. Train the model first.", file=sys.stderr)
         return 1
 
-    labels_path = MODELS_DIR / "labels.json"
+    labels_path = args.labels
     if not labels_path.is_file():
-        print(f"ERROR: {labels_path} not found. Run preprocess.py first.", file=sys.stderr)
+        print(f"ERROR: {labels_path} not found. Run the preprocess step first.",
+              file=sys.stderr)
         return 1
 
     from tensorflow import keras
 
     class_names = json.loads(labels_path.read_text(encoding="utf-8"))["classes"]
 
-    features = np.load(PROCESSED_DIR / f"X_{args.split}.npy")
-    targets = np.load(PROCESSED_DIR / f"y_{args.split}.npy")
+    features_path = PROCESSED_DIR / f"X_{args.prefix}{args.split}.npy"
+    targets_path = PROCESSED_DIR / f"y_{args.prefix}{args.split}.npy"
+
+    for path in (features_path, targets_path):
+        if not path.is_file():
+            print(f"ERROR: {path} not found. Run the preprocess step first.",
+                  file=sys.stderr)
+            return 1
+
+    features = np.load(features_path)
+    targets = np.load(targets_path)
+
+    if len(features) == 0:
+        print(f"ERROR: {features_path.name} is empty — the {args.split} split has no "
+              "samples. See the coverage warnings from preprocessing.", file=sys.stderr)
+        return 1
 
     print(f"Model:  {args.model.relative_to(REPO_ROOT)}")
     print(f"Split:  {args.split}  ({len(features):,} samples, {len(class_names)} classes)\n")
@@ -215,13 +242,22 @@ def main() -> int:
     print(f"  top-3 accuracy   {top3:.4f}")
     print(f"{'=' * 58}\n")
 
+    # `labels=` is required, not optional. A signer-disjoint split can leave a
+    # class with no test samples at all, and without an explicit label list
+    # scikit-learn infers the classes from the data, finds fewer than
+    # target_names has entries, and raises. Passing the full range keeps the
+    # report aligned with labels.json and shows the absent class as zero support.
+    label_indices = np.arange(len(class_names))
+
     report_text = classification_report(
-        targets, predictions, target_names=class_names, digits=4, zero_division=0
+        targets, predictions, labels=label_indices, target_names=class_names,
+        digits=4, zero_division=0,
     )
     print(report_text)
 
     report_dict = classification_report(
-        targets, predictions, target_names=class_names, output_dict=True, zero_division=0
+        targets, predictions, labels=label_indices, target_names=class_names,
+        output_dict=True, zero_division=0,
     )
 
     matrix = confusion_matrix(targets, predictions, labels=np.arange(len(class_names)))
@@ -229,17 +265,17 @@ def main() -> int:
     # --- figures ------------------------------------------------------------
     IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
-    confusion_path = IMAGES_DIR / "confusion_matrix.png"
+    confusion_path = IMAGES_DIR / f"confusion_matrix{args.image_tag}.png"
     plot_confusion_matrix(matrix, class_names, confusion_path)
     print(f"Wrote {confusion_path.relative_to(REPO_ROOT)}")
 
-    per_class_path = IMAGES_DIR / "per_class_accuracy.png"
+    per_class_path = IMAGES_DIR / f"per_class_accuracy{args.image_tag}.png"
     plot_per_class_accuracy(matrix, class_names, per_class_path)
     print(f"Wrote {per_class_path.relative_to(REPO_ROOT)}")
 
-    history_path = MODELS_DIR / "training_history.json"
+    history_path = MODELS_DIR / args.history
     if history_path.is_file():
-        curves_path = IMAGES_DIR / "training_curves.png"
+        curves_path = IMAGES_DIR / f"training_curves{args.image_tag}.png"
         plot_training_curves(json.loads(history_path.read_text(encoding="utf-8")), curves_path)
         print(f"Wrote {curves_path.relative_to(REPO_ROOT)}")
 
@@ -254,6 +290,7 @@ def main() -> int:
 
     # --- save ---------------------------------------------------------------
     evaluation = {
+        "model": str(args.model.name),
         "split": args.split,
         "samples": int(len(features)),
         "classes": class_names,
@@ -279,7 +316,7 @@ def main() -> int:
         "confusion_matrix": matrix.tolist(),
     }
 
-    evaluation_path = MODELS_DIR / "evaluation_report.json"
+    evaluation_path = MODELS_DIR / args.report
     evaluation_path.write_text(json.dumps(evaluation, indent=2), encoding="utf-8")
     print(f"\nWrote {evaluation_path.relative_to(REPO_ROOT)}")
 

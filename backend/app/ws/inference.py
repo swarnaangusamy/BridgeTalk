@@ -33,9 +33,10 @@ from sqlalchemy import select
 
 from app.core.security import decode_access_token
 from app.database import SessionLocal
-from app.ml.normalization import normalize_primary_hand
-from app.ml.predictor import ModelNotLoadedError, predictor
-from app.ml.smoothing import NEUTRAL_LABEL, PredictionSmoother
+from app.ml.normalization import normalize_hands, normalize_primary_hand
+from app.ml.predictor import ModelNotLoadedError, dynamic_predictor, predictor
+from app.ml.sequence import SequenceBuffer
+from app.ml.smoothing import NEUTRAL_LABEL, PredictionSmoother, SmoothingConfig
 from app.models.meeting import Meeting
 from app.models.user import User
 from app.ws.connection_manager import inference_manager
@@ -48,6 +49,13 @@ router = APIRouter()
 # an authentication failure, and 1011 is "internal error".
 WS_POLICY_VIOLATION = 1008
 WS_INTERNAL_ERROR = 1011
+
+# The two recognition modes. Anything else is rejected rather than silently
+# treated as static — a client sending "STATIC" or "letters" should be told it
+# is wrong, not quietly given behaviour it did not ask for.
+STATIC_MODE = "static"
+DYNAMIC_MODE = "dynamic"
+VALID_MODES = frozenset({STATIC_MODE, DYNAMIC_MODE})
 
 
 def _authenticate(token: str) -> User | None:
@@ -86,6 +94,146 @@ def _meeting_exists(meeting_code: str) -> bool:
 
 def _error(code: str, message: str) -> dict[str, Any]:
     return {"type": "error", "code": code, "message": message}
+
+
+def _handle_static_frame(
+    hands: list[dict[str, Any]],
+    smoother: PredictionSmoother,
+    received_at: float,
+) -> dict[str, Any] | None:
+    """One frame through Model A: a single hand shape becomes a letter.
+
+    Returns the message to send back, or an error message. Kept synchronous and
+    free of WebSocket calls so it can be unit-tested against a list of frames
+    without a running server.
+    """
+    # No hand in frame. This is the neutral state, and it is resolved WITHOUT
+    # calling the model — there are no landmarks to classify. It is also why
+    # 'nothing' is not a trained class: see ml/models/dataset_manifest.json.
+    if not hands:
+        result = smoother.push(None, 0.0)
+        return {
+            "type": "prediction",
+            "mode": STATIC_MODE,
+            "label": NEUTRAL_LABEL,
+            "confidence": 0.0,
+            "stable": False,
+            "sentence": result.sentence,
+            "hand_detected": False,
+            "latency_ms": round((time.perf_counter() - received_at) * 1000, 1),
+            "_result": result,
+        }
+
+    try:
+        features = normalize_primary_hand(hands)
+    except (ValueError, TypeError) as exc:
+        return _error("INVALID_MESSAGE", f"Bad landmark data: {exc}")
+
+    try:
+        label, confidence, _ = predictor.predict(features)
+    except ModelNotLoadedError as exc:
+        return _error("MODEL_NOT_LOADED", str(exc))
+    except ValueError as exc:
+        return _error("INVALID_MESSAGE", str(exc))
+
+    result = smoother.push(label, confidence)
+
+    return {
+        "type": "prediction",
+        "mode": STATIC_MODE,
+        "label": result.label,
+        "confidence": round(result.confidence, 4),
+        "stable": result.stable,
+        "emitted": result.emitted,
+        "sentence": result.sentence,
+        "hand_detected": True,
+        # Server receive-to-send time. Surfacing a real number the UI can
+        # display is worth a lot in a review — it turns "it feels fast" into
+        # "38 milliseconds".
+        "latency_ms": round((time.perf_counter() - received_at) * 1000, 1),
+        "_result": result,
+    }
+
+
+def _handle_dynamic_frame(
+    hands: list[dict[str, Any]],
+    buffer: SequenceBuffer,
+    smoother: PredictionSmoother,
+    received_at: float,
+) -> dict[str, Any] | None:
+    """One frame through Model B: a window of frames becomes a word.
+
+    The important difference from the static path is that **most frames produce
+    no prediction at all**. A word sign needs a full window of 30 frames — three
+    seconds at 10 FPS — and even then only every `stride`-th frame is
+    classified. Rather than going silent while that happens, this reports how
+    full the buffer is, so the UI can show "listening…" with real progress
+    instead of appearing broken.
+    """
+    if not dynamic_predictor.is_loaded:
+        return _error(
+            "MODEL_NOT_LOADED",
+            dynamic_predictor.load_error
+            or "Word-sign recognition is not available on this server",
+        )
+
+    if hands:
+        try:
+            features = normalize_hands(hands)
+        except (ValueError, TypeError) as exc:
+            return _error("INVALID_MESSAGE", f"Bad landmark data: {exc}")
+    else:
+        features = None
+
+    try:
+        window = buffer.push(features)
+    except ValueError as exc:
+        return _error("INVALID_MESSAGE", str(exc))
+
+    # Buffer not ready, or this frame fell between strides. Feed the smoother
+    # the neutral signal when the hands are gone so its reset logic still runs,
+    # but do not invent a prediction.
+    if window is None:
+        result = smoother.push(None, 0.0) if not hands else None
+        return {
+            "type": "prediction",
+            "mode": DYNAMIC_MODE,
+            "label": NEUTRAL_LABEL,
+            "confidence": 0.0,
+            "stable": False,
+            "sentence": result.sentence if result else smoother.sentence,
+            "hand_detected": bool(hands),
+            "buffering": True,
+            "buffer_filled": buffer.filled,
+            "buffer_length": buffer.length,
+            "latency_ms": round((time.perf_counter() - received_at) * 1000, 1),
+            "_result": result,
+        }
+
+    try:
+        label, confidence, _ = dynamic_predictor.predict(window)
+    except ModelNotLoadedError as exc:
+        return _error("MODEL_NOT_LOADED", str(exc))
+    except ValueError as exc:
+        return _error("INVALID_MESSAGE", str(exc))
+
+    result = smoother.push(label, confidence)
+
+    return {
+        "type": "prediction",
+        "mode": DYNAMIC_MODE,
+        "label": result.label,
+        "confidence": round(result.confidence, 4),
+        "stable": result.stable,
+        "emitted": result.emitted,
+        "sentence": result.sentence,
+        "hand_detected": bool(hands),
+        "buffering": False,
+        "buffer_filled": buffer.filled,
+        "buffer_length": buffer.length,
+        "latency_ms": round((time.perf_counter() - received_at) * 1000, 1),
+        "_result": result,
+    }
 
 
 @router.websocket("/ws/predict/{meeting_code}")
@@ -134,9 +282,21 @@ async def predict_socket(
         websocket, normalized_code, user.id, user.name
     )
 
-    # One smoother per connection. Sharing state between two people signing at
-    # once would interleave their letters into a single sentence.
-    smoother = PredictionSmoother()
+    # One set of recognition state per connection. Sharing it between two people
+    # signing at once would interleave their letters into a single sentence.
+    #
+    # Each mode gets its own smoother because they need different thresholds and
+    # different debounce timing (see SmoothingConfig.for_dynamic). The sentence
+    # is handed between them on a mode switch, so the user keeps writing one
+    # continuous piece of text.
+    smoothers = {
+        STATIC_MODE: PredictionSmoother(),
+        DYNAMIC_MODE: PredictionSmoother(SmoothingConfig.for_dynamic(), word_mode=True),
+    }
+    buffer = SequenceBuffer()
+    active_mode = STATIC_MODE
+
+    smoother = smoothers[STATIC_MODE]
     connection.state["smoother"] = smoother
 
     # Tell the client what it is connected to, so the UI can show model status
@@ -148,11 +308,21 @@ async def predict_socket(
             "meeting_code": normalized_code,
             "user": {"id": user.id, "name": user.name},
             "model": predictor.describe(),
+            # Advertised so the UI can enable or hide the word-sign toggle
+            # rather than offering a mode that cannot work on this deployment.
+            "dynamic_model": dynamic_predictor.describe(),
             "config": {
                 "confidence_threshold": smoother.config.confidence_threshold,
                 "majority_window": smoother.config.majority_window,
                 "majority_min": smoother.config.majority_min,
                 "cooldown_ms": smoother.config.cooldown_ms,
+            },
+            "dynamic_config": {
+                "confidence_threshold": smoothers[DYNAMIC_MODE].config.confidence_threshold,
+                "majority_window": smoothers[DYNAMIC_MODE].config.majority_window,
+                "majority_min": smoothers[DYNAMIC_MODE].config.majority_min,
+                "cooldown_ms": smoothers[DYNAMIC_MODE].config.cooldown_ms,
+                **buffer.describe(),
             },
         },
     )
@@ -173,7 +343,8 @@ async def predict_socket(
 
             # --- UI controls ---------------------------------------------
             if message_type == "clear":
-                smoother.clear()
+                smoothers[active_mode].clear()
+                buffer.reset()
                 await inference_manager.send_personal(
                     connection, {"type": "sentence", "sentence": ""}
                 )
@@ -181,7 +352,8 @@ async def predict_socket(
 
             if message_type == "backspace":
                 await inference_manager.send_personal(
-                    connection, {"type": "sentence", "sentence": smoother.backspace()}
+                    connection,
+                    {"type": "sentence", "sentence": smoothers[active_mode].backspace()},
                 )
                 continue
 
@@ -226,78 +398,65 @@ async def predict_socket(
             received_at = time.perf_counter()
             hands = message.get("hands") or []
 
-            # No hand in frame. This is the neutral state, and it is resolved
-            # WITHOUT calling the model — there are no landmarks to classify.
-            # It is also why 'nothing' is not a trained class: see
-            # ml/models/dataset_manifest.json.
-            if not hands:
-                result = smoother.push(None, 0.0)
+            requested_mode = str(message.get("mode") or STATIC_MODE).strip().lower()
+            if requested_mode not in VALID_MODES:
                 await inference_manager.send_personal(
                     connection,
-                    {
-                        "type": "prediction",
-                        "label": NEUTRAL_LABEL,
-                        "confidence": 0.0,
-                        "stable": False,
-                        "sentence": result.sentence,
-                        "hand_detected": False,
-                        "latency_ms": round((time.perf_counter() - received_at) * 1000, 1),
-                    },
+                    _error(
+                        "INVALID_MESSAGE",
+                        f"Unknown mode {requested_mode!r}. Expected one of "
+                        f"{sorted(VALID_MODES)}.",
+                    ),
                 )
                 continue
 
-            try:
-                features = normalize_primary_hand(hands)
-            except (ValueError, TypeError) as exc:
-                await inference_manager.send_personal(
-                    connection, _error("INVALID_MESSAGE", f"Bad landmark data: {exc}")
-                )
+            # --- mode switch ------------------------------------------------
+            if requested_mode != active_mode:
+                previous = smoothers[active_mode]
+                smoothers[requested_mode].adopt(previous.sentence)
+                # A partially-filled window recorded before the switch describes
+                # the wrong kind of gesture, so it is discarded rather than
+                # forming the first half of a word sign.
+                buffer.reset()
+                active_mode = requested_mode
+                connection.state["smoother"] = smoothers[active_mode]
+
+            smoother = smoothers[active_mode]
+
+            if requested_mode == DYNAMIC_MODE:
+                result_message = _handle_dynamic_frame(hands, buffer, smoother, received_at)
+            else:
+                result_message = _handle_static_frame(hands, smoother, received_at)
+
+            if result_message is None:
                 continue
 
-            try:
-                label, confidence, _ = predictor.predict(features)
-            except ModelNotLoadedError as exc:
-                await inference_manager.send_personal(
-                    connection, _error("MODEL_NOT_LOADED", str(exc))
-                )
-                continue
-            except ValueError as exc:
-                await inference_manager.send_personal(
-                    connection, _error("INVALID_MESSAGE", str(exc))
-                )
+            if result_message.get("type") == "error":
+                await inference_manager.send_personal(connection, result_message)
                 continue
 
-            result = smoother.push(label, confidence)
-            latency_ms = round((time.perf_counter() - received_at) * 1000, 1)
-
-            await inference_manager.send_personal(
-                connection,
-                {
-                    "type": "prediction",
-                    "label": result.label,
-                    "confidence": round(result.confidence, 4),
-                    "stable": result.stable,
-                    "emitted": result.emitted,
-                    "sentence": result.sentence,
-                    "hand_detected": True,
-                    # Server receive-to-send time. Surfacing a real number the
-                    # UI can display is worth a lot in a review — it turns
-                    # "it feels fast" into "38 milliseconds".
-                    "latency_ms": latency_ms,
-                },
-            )
+            result = result_message.pop("_result")
+            await inference_manager.send_personal(connection, result_message)
 
             # --- broadcast to the other participant ------------------------
             # Only accepted letters are broadcast, never per-frame flicker, so
             # the other person's subtitle updates when something was actually
             # recognised rather than 10 times a second.
-            if result.emitted is not None and normalized_code != "DEMO":
+            #
+            # `result` is None while the dynamic buffer is still filling — those
+            # frames produced no prediction at all, so there is nothing to send.
+            if result is not None and result.emitted is not None and normalized_code != "DEMO":
                 await inference_manager.broadcast(
                     normalized_code,
                     {
                         "type": "subtitle",
                         "from": {"id": user.id, "name": user.name},
                         "source": "sign",
+                        # Which model produced this, so the transcript can
+                        # record that a word came from Model B — whose accuracy
+                        # is materially lower — rather than presenting both
+                        # sources as equally reliable.
+                        "mode": active_mode,
                         "text": result.sentence,
                         "emitted": result.emitted,
                         "confidence": round(result.confidence, 4),

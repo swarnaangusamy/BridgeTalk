@@ -48,6 +48,7 @@ export default function MeetingRoom() {
   const [landmarks, setLandmarks] = useState([]);
 
   const [signDetectionOn, setSignDetectionOn] = useState(true);
+  const [recognitionMode, setRecognitionMode] = useState('static');
   const [micOn, setMicOn] = useState(true);
   const [cameraOn, setCameraOn] = useState(true);
   const [speechOn, setSpeechOn] = useState(false);
@@ -175,6 +176,7 @@ export default function MeetingRoom() {
     sentence,
     serverError: signError,
     modelInfo,
+    dynamicModelInfo,
     sendLandmarks,
     sendSpeech,
     clearSentence,
@@ -185,8 +187,14 @@ export default function MeetingRoom() {
     onSubtitle: handleIncomingSubtitle,
   });
 
+  // One hand for fingerspelling, two for word signs — Model B's features have
+  // a slot for each hand and tracking only one would leave half of every input
+  // zero. See RecognitionModeToggle for why the two modes are not equivalent.
   const { detect, status: landmarkerStatus, error: landmarkerError, isReady } =
-    useHandLandmarker({ numHands: 1, enabled: signDetectionOn });
+    useHandLandmarker({
+      numHands: recognitionMode === 'dynamic' ? 2 : 1,
+      enabled: signDetectionOn,
+    });
 
   useEffect(() => {
     if (!localStream || !isReady || !signDetectionOn || !cameraOn) return undefined;
@@ -203,15 +211,16 @@ export default function MeetingRoom() {
         setLandmarks(result.landmarks);
         if (shouldSend) {
           lastSentRef.current = now;
-          sendLandmarks(toWireFormat(result), 'static');
+          sendLandmarks(toWireFormat(result), recognitionMode);
         }
       } else {
         setLandmarks([]);
         if (shouldSend) {
           lastSentRef.current = now;
           // Empty frames matter: they drive the neutral reset that closes a
-          // word when the signer lowers their hand.
-          sendLandmarks([], 'static');
+          // word when the signer lowers their hand, and in dynamic mode they
+          // are what marks the boundary between two signs.
+          sendLandmarks([], recognitionMode);
         }
       }
 
@@ -223,7 +232,7 @@ export default function MeetingRoom() {
       active = false;
       cancelAnimationFrame(rafRef.current);
     };
-  }, [localStream, isReady, signDetectionOn, cameraOn, detect, sendLandmarks]);
+  }, [localStream, isReady, signDetectionOn, cameraOn, detect, sendLandmarks, recognitionMode]);
 
   // Show each accepted letter locally, and persist completed WORDS.
   //
@@ -491,7 +500,10 @@ export default function MeetingRoom() {
             sentence={sentence}
             serverError={signError}
             modelInfo={modelInfo}
+            dynamicModelInfo={dynamicModelInfo}
             handDetected={handDetected}
+            mode={recognitionMode}
+            onModeChange={setRecognitionMode}
             onClear={clearSentence}
             onBackspace={backspace}
           />
