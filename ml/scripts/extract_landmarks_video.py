@@ -130,6 +130,8 @@ SEQUENCE_LENGTH = 30
 # trajectory — the model would be learning from a handful of scattered points.
 MIN_DETECTION_RATE = 0.30
 
+BOLD, RESET = "\033[1m", "\033[0m"
+
 _LANDMARKER_PATH: str | None = None
 
 
@@ -468,6 +470,123 @@ def extract_one(job: dict) -> dict:
         capture.release()
 
 
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp"}
+
+
+def inspect_layout(root: Path) -> int:
+    """Report what a downloaded dataset actually contains, without extracting.
+
+    WHY THIS EXISTS
+    ---------------
+    Word-level sign datasets are distributed in wildly different shapes: a
+    metadata JSON plus a flat video pile, one folder per word, one folder per
+    signer, or pre-extracted image frames. Which one you got is not usually
+    stated on the download page, and finding out by running a three-hour
+    extraction that fails at the end is a bad way to spend an evening.
+
+    This walks the tree, reports what is there, and says whether the extractor
+    can consume it — in seconds, before committing to anything.
+    """
+    print(f"\nInspecting: {root}")
+
+    if not root.is_dir():
+        print(f"\n  NOT FOUND — no such directory.")
+        print(f"  Unzip your download into: {root}")
+        return 1
+
+    videos: list[Path] = []
+    images: list[Path] = []
+    metadata: list[Path] = []
+
+    for item in root.rglob("*"):
+        if not item.is_file():
+            continue
+        suffix = item.suffix.lower()
+        if suffix in VIDEO_SUFFIXES:
+            videos.append(item)
+        elif suffix in IMAGE_SUFFIXES:
+            images.append(item)
+        elif suffix == ".json":
+            metadata.append(item)
+
+    # Directories that directly contain video files are candidate classes.
+    video_dirs: dict[Path, int] = defaultdict(int)
+    for video in videos:
+        video_dirs[video.parent] += 1
+
+    image_dirs: dict[Path, int] = defaultdict(int)
+    for image in images:
+        image_dirs[image.parent] += 1
+
+    print(f"\n  video files      {len(videos):,}")
+    print(f"  image files      {len(images):,}")
+    print(f"  json files       {len(metadata):,}")
+    print(f"  folders with video  {len(video_dirs):,}")
+    print(f"  folders with images {len(image_dirs):,}")
+
+    if videos:
+        print(f"\n  {BOLD}sample video paths{RESET}")
+        for video in videos[:5]:
+            print(f"    {video.relative_to(root)}")
+
+    # --- verdict ------------------------------------------------------------
+    print()
+
+    if metadata and videos:
+        for candidate in metadata:
+            try:
+                data = json.loads(candidate.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+                continue
+            if isinstance(data, list) and data and "gloss" in data[0]:
+                print(f"  LAYOUT: WLASL-style metadata JSON ({candidate.name})")
+                print("  USABLE with:  --dataset wlasl")
+                return 0
+
+    if len(video_dirs) >= 5:
+        labels = sorted({clean_class_name(d.name) for d in video_dirs})
+        per_folder = sorted(video_dirs.values())
+        median = per_folder[len(per_folder) // 2]
+
+        print(f"  LAYOUT: one folder per word ({len(labels)} distinct labels after cleaning)")
+        print(f"  clips per folder: min {per_folder[0]}, median {median}, max {per_folder[-1]}")
+        print(f"  sample labels: {', '.join(labels[:12])}"
+              f"{', ...' if len(labels) > 12 else ''}")
+        print(f"\n  USABLE with:  --dataset include --raw-dir {root}")
+
+        if median < 4:
+            print(f"\n  WARNING: only ~{median} clips per word. That is very few to")
+            print("  train on, and the split will be thin. Prefer a dataset with 10+.")
+        return 0
+
+    if len(video_dirs) == 1 and len(videos) >= 20:
+        print("  LAYOUT: all videos in ONE folder, so the word must be encoded in")
+        print("  the filenames. The extractor cannot guess that scheme.")
+        print("\n  Paste these filenames to Claude and the parser can be added:")
+        for video in videos[:8]:
+            print(f"    {video.name}")
+        return 1
+
+    if len(image_dirs) >= 5 and not videos:
+        print(f"  LAYOUT: image frames, not video ({len(image_dirs):,} folders).")
+        print("  This is either an ALPHABET dataset or a word dataset shipped as")
+        print("  pre-extracted frames. Check whether the folder names are letters")
+        print("  or words:")
+        for directory in sorted(image_dirs)[:8]:
+            print(f"    {directory.relative_to(root)}/  ({image_dirs[directory]} images)")
+        print("\n  If they are LETTERS (A, B, C...), this is an alphabet dataset —")
+        print("  move it to ml/data/raw/isl_alphabet/ and use:")
+        print("    python ml/scripts/download_datasets.py --dataset isl --verify")
+        print("\n  If they are WORDS, tell Claude — frame-sequence extraction is")
+        print("  a small addition to this script.")
+        return 1
+
+    print("  LAYOUT: unrecognised.")
+    print("  Nothing here looks like a sign-language dataset the extractor knows.")
+    print("  Check the archive extracted fully, then paste this output to Claude.")
+    return 1
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -490,14 +609,26 @@ def main() -> int:
         default="include",
         help="include = Indian Sign Language words (default) · wlasl = ASL words",
     )
+    parser.add_argument(
+        "--raw-dir", type=Path, default=None,
+        help="Point at any downloaded dataset folder, overriding the default",
+    )
+    parser.add_argument(
+        "--inspect", action="store_true",
+        help="Report what a download contains and whether it is usable, then exit",
+    )
     args = parser.parse_args()
+
+    if args.inspect:
+        target = args.raw_dir or DATASETS[args.dataset]["dir"]
+        return inspect_layout(target)
 
     if not HAND_MODEL.is_file():
         print(f"ERROR: {HAND_MODEL} missing. Run ./scripts/setup.sh", file=sys.stderr)
         return 1
 
     config = DATASETS[args.dataset]
-    raw_dir = config["dir"]
+    raw_dir = args.raw_dir or config["dir"]
     cap = 3 if args.dry_run else args.limit_per_gloss
 
     print(f"Dataset:  {config['title']}")

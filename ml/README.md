@@ -196,10 +196,34 @@ python ml/scripts/preprocess_dynamic.py
 python ml/scripts/train_dynamic.py
 ```
 
-**Dataset (ISL): INCLUDE** — Sridhar et al., ACM Multimedia 2020.
-<https://zenodo.org/record/4010759> · ~4,200 clips, 263 words, recorded with
-deaf students. `--dataset include` is the default; `--dataset wlasl` selects
-the American dataset instead.
+**Dataset (ISL): INCLUDE** — Sridhar et al., ACM Multimedia 2020. ~4,200
+clips, 263 words, recorded with deaf students. Academically hosted (Zenodo);
+search "INCLUDE Indian Sign Language dataset" rather than trusting a link
+copied from here, since these move. `--dataset include` is the default;
+`--dataset wlasl` selects the American dataset instead.
+
+### Check a download before committing to it
+
+```bash
+python ml/scripts/extract_landmarks_video.py --inspect --raw-dir <your folder>
+```
+
+Word-level sign datasets ship in wildly different shapes and the download page
+rarely says which. This walks the tree in seconds and reports what is actually
+there, so nobody discovers the layout was wrong after a three-hour extraction:
+
+| What it finds | Verdict |
+|---|---|
+| One folder per word | `--dataset include --raw-dir <folder>` |
+| A WLASL-style metadata JSON | `--dataset wlasl` |
+| All videos in one folder | Unusable as-is — the word is in the filename, and that scheme has to be added |
+| Image frames, not video | Probably an alphabet dataset — use the Model C pipeline instead |
+
+`--raw-dir` also works for real extraction, so a dataset can live anywhere
+rather than having to be named `include/`.
+
+**Any folder-per-word video tree works**, not only INCLUDE. Folder names are
+cleaned (numbering stripped, lowercased) before becoming labels.
 
 The two datasets are laid out completely differently, so discovery is the only
 part that forks:

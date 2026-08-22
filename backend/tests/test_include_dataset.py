@@ -130,3 +130,98 @@ def test_random_split_covers_every_class(pre):
     for name in ("train", "val", "test"):
         present = {glosses[i] for i in indices[name]}
         assert present == {"a", "b", "c"}, f"{name} is missing a class"
+
+
+# --------------------------------------------------------------------------- #
+# The layout inspector
+# --------------------------------------------------------------------------- #
+#
+# This is a decision tool: someone downloads an unknown dataset and needs to
+# know in seconds whether it is usable, rather than after a three-hour
+# extraction fails. Misreporting a layout sends them down the wrong path, so
+# each verdict is pinned.
+
+
+def _make_video(path: Path) -> None:
+    import cv2
+    import numpy as np
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), 25, (32, 32))
+    for _ in range(3):
+        writer.write(np.zeros((32, 32, 3), dtype=np.uint8))
+    writer.release()
+
+
+def test_inspector_reports_missing_directory(extract, tmp_path, capsys):
+    assert extract.inspect_layout(tmp_path / "nope") == 1
+    assert "NOT FOUND" in capsys.readouterr().out
+
+
+def test_inspector_recognises_folder_per_word(extract, tmp_path, capsys):
+    for word in ("1. hello", "2. thanks", "3. cat", "4. dog", "5. red", "6. blue"):
+        for clip in range(5):
+            _make_video(tmp_path / "Category" / word / f"c{clip}.mp4")
+
+    assert extract.inspect_layout(tmp_path) == 0
+
+    out = capsys.readouterr().out
+    assert "one folder per word" in out
+    assert "--dataset include" in out
+    # Numbering stripped, so the labels are the words themselves.
+    assert "hello" in out and "1. hello" not in out.split("sample labels")[1]
+
+
+def test_inspector_recognises_wlasl_metadata(extract, tmp_path, capsys):
+    import json
+
+    for index in range(12):
+        _make_video(tmp_path / "videos" / f"{index:05d}.mp4")
+    (tmp_path / "WLASL_v0.3.json").write_text(
+        json.dumps([{"gloss": "book", "instances": [{"video_id": "00001"}]}])
+    )
+
+    assert extract.inspect_layout(tmp_path) == 0
+    assert "--dataset wlasl" in capsys.readouterr().out
+
+
+def test_inspector_flags_a_flat_pile_as_unusable(extract, tmp_path, capsys):
+    """Videos in one folder means the word is in the filename, which cannot be
+    guessed. The inspector must say so and show the names rather than
+    pretending the dataset is fine."""
+    for word in ("hello", "thanks", "cat"):
+        for index in range(8):
+            _make_video(tmp_path / f"{word}_{index}.mp4")
+
+    assert extract.inspect_layout(tmp_path) == 1
+
+    out = capsys.readouterr().out
+    assert "ONE folder" in out
+    assert "hello_" in out, "should print sample filenames to work from"
+
+
+def test_inspector_redirects_image_datasets_to_the_alphabet_path(extract, tmp_path, capsys):
+    """An alphabet dataset downloaded into the video folder is a likely mistake,
+    and the fix is a different command entirely."""
+    import cv2
+    import numpy as np
+
+    for letter in "ABCDEFGH":
+        directory = tmp_path / letter
+        directory.mkdir(parents=True)
+        for index in range(6):
+            cv2.imwrite(str(directory / f"{index}.jpg"), np.zeros((32, 32, 3), np.uint8))
+
+    assert extract.inspect_layout(tmp_path) == 1
+
+    out = capsys.readouterr().out
+    assert "image frames" in out
+    assert "isl_alphabet" in out, "should point at the alphabet pipeline"
+
+
+def test_inspector_warns_when_there_are_too_few_clips_per_word(extract, tmp_path, capsys):
+    for word in ("hello", "thanks", "cat", "dog", "red", "blue"):
+        _make_video(tmp_path / word / "only.mp4")
+
+    assert extract.inspect_layout(tmp_path) == 0
+    assert "WARNING" in capsys.readouterr().out
