@@ -302,14 +302,34 @@ def main() -> int:
     print(f"Classes: {len(class_names)}   Signers: {len(set(signer_ids.tolist()))}")
 
     # --- split --------------------------------------------------------------
-    if args.split_strategy == "signer":
+    # A signer-disjoint split is only possible when the dataset records WHO
+    # signed each clip. WLASL does; INCLUDE does not, and extraction stores -1
+    # rather than inventing an ID. Silently "succeeding" here would be the worst
+    # outcome: every clip lands in one bucket, and the manifest goes on claiming
+    # the strongest evaluation this project offers.
+    known_signers = sorted({int(s) for s in signer_ids.tolist() if int(s) >= 0})
+    strategy = args.split_strategy
+
+    if strategy == "signer" and len(known_signers) < 3:
+        print("\n  NOTE: this dataset does not record signer identity"
+              f" ({len(known_signers)} known signers).")
+        print("  A signer-disjoint split is impossible, so falling back to a")
+        print("  stratified random split. The resulting accuracy answers")
+        print('  "can it recognise clips like the ones it trained on?" rather')
+        print('  than "will it work for someone new?" — a weaker question.')
+        print("  This is recorded as signer_disjoint: false in the manifest so")
+        print("  nothing downstream can overstate it.")
+        strategy = "random"
+
+    if strategy == "signer":
         indices = split_by_signer(glosses, signer_ids, args.seed)
-    elif args.split_strategy == "official":
+    elif strategy == "official":
         indices = split_by_official(official_splits)
     else:
         indices = split_randomly(glosses, args.seed)
 
-    print(f"\nSplit strategy: {args.split_strategy}")
+    print(f"\nSplit strategy: {strategy}"
+          f"{' (requested: ' + args.split_strategy + ')' if strategy != args.split_strategy else ''}")
     for name in ("train", "val", "test"):
         chosen = indices[name]
         signers = sorted({int(signer_ids[i]) for i in chosen}) if len(chosen) else []
@@ -335,9 +355,10 @@ def main() -> int:
         print("  --split-strategy official trades signer-disjointness for coverage.")
 
     if len(indices["train"]) == 0 or len(indices["test"]) == 0:
-        print("\nERROR: a split came out empty. Too few signers to hold any out.",
+        print("\nERROR: a split came out empty.", file=sys.stderr)
+        print("Too few clips, or too few signers to hold any out.", file=sys.stderr)
+        print("Try --split-strategy random, or extract more clips per gloss.",
               file=sys.stderr)
-        print("Re-run with --split-strategy official.", file=sys.stderr)
         return 1
 
     X_train = sequences[indices["train"]]
@@ -383,8 +404,13 @@ def main() -> int:
         "sequence_length": int(sequences.shape[1]),
         "features_per_frame": TWO_HAND_FEATURES,
         "classes": class_names,
-        "split_strategy": args.split_strategy,
-        "signer_disjoint": args.split_strategy == "signer",
+        "split_strategy": strategy,
+        "split_strategy_requested": args.split_strategy,
+        # The single most important honesty flag in this file. The backend
+        # forwards it to the UI, which only says "tested on unseen signers"
+        # when it is true.
+        "signer_disjoint": strategy == "signer",
+        "signers_recorded_by_dataset": bool(known_signers),
         "splits": {
             "train": int(len(X_train)),
             "val": int(len(X_val)),

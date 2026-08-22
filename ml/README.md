@@ -39,6 +39,7 @@ Kaggle
 ml/data/raw/                       images and videos              (gitignored)
   │  extract_landmarks_images.py   OpenCV + MediaPipe IMAGE mode → 21×3 points
   │  extract_landmarks_video.py    MediaPipe VIDEO mode → (30, 126) sequences
+  │                                 --dataset include (ISL) | wlasl (ASL)
   ▼
 ml/data/processed/                 landmark CSV / NPZ             (gitignored)
   │  preprocess.py                 balance · augment · split by capture order
@@ -182,10 +183,71 @@ number comes out of the run above is the first real one.
 
 ---
 
-## Model B — dynamic word signs (stretch goal)
+## Model B — word-level signs (ISL via INCLUDE, or ASL via WLASL)
 
-**Dataset (preferred):** WLASL processed — Kaggle `risangbaskoro/wlasl-processed`,
-restricted to the 20 glosses with the most video samples.
+**This is what "real-time sign language translation" actually needs.** A fluent
+deaf signer signs *words*, not letters — fingerspelling is reserved mostly for
+proper nouns. An alphabet model watching natural signing produces unrelated
+output, not merely worse output.
+
+```bash
+python ml/scripts/extract_landmarks_video.py --dataset include   # default
+python ml/scripts/preprocess_dynamic.py
+python ml/scripts/train_dynamic.py
+```
+
+**Dataset (ISL): INCLUDE** — Sridhar et al., ACM Multimedia 2020.
+<https://zenodo.org/record/4010759> · ~4,200 clips, 263 words, recorded with
+deaf students. `--dataset include` is the default; `--dataset wlasl` selects
+the American dataset instead.
+
+The two datasets are laid out completely differently, so discovery is the only
+part that forks:
+
+| | WLASL (ASL) | INCLUDE (ISL) |
+|---|---|---|
+| Classes from | `WLASL_v0.3.json` | folder names |
+| Clip trimming | `frame_start` / `frame_end` | already trimmed |
+| Signer identity | **recorded** | **not recorded** |
+| Split | signer-disjoint | stratified random (see below) |
+
+Folder names are cleaned before use: INCLUDE numbers its word folders per
+category, so `1. hello` and `9. hello` are the same word listed twice, and
+keeping the numbers would train two classes nothing could tell apart.
+
+### INCLUDE cannot support a signer-disjoint split, and says so
+
+Model B's strongest claim on WLASL is that its test set holds out entire
+*people*. **INCLUDE does not record who signed each clip**, so extraction
+stores `signer_id: -1` rather than inventing one, and `preprocess_dynamic.py`
+detects that and falls back to a stratified random split — loudly, and with
+`signer_disjoint: false` written into the manifest, the model metadata and the
+`/health` response.
+
+That flag is the point. Without the fallback the split silently collapses into
+a single bucket while every downstream document goes on claiming the strongest
+evaluation the project offers. A test guards this: it asserts that unknown
+signers *do* collapse, so the day that stops being true the guard is revisited
+rather than quietly kept.
+
+### The honest limit for a live demo
+
+Model B is trained on clips **trimmed to one sign**. Live, landmarks arrive as
+an unbroken stream and nothing announces where a sign starts. `sequence.py`
+applies two heuristics — a run of hand-free frames ends a sign, and a
+mostly-empty window is never classified — and neither helps a signer who moves
+continuously from one sign into the next.
+
+**For a demo this means: sign one word, drop the hands, sign the next.** That
+is a real constraint, not a polish item, and continuous sign segmentation is an
+open research problem rather than something to fix before a review.
+
+---
+
+## Model B architecture
+
+Identical for both languages — only the training data and the label list
+change, which is the direct benefit of classifying landmarks rather than pixels.
 
 ```
 Input (30, 126) →  Masking
@@ -215,7 +277,8 @@ Every piece of Model B is written, tested and wired end to end:
 | `/ws/predict` `mode: "dynamic"` | routed, with buffering progress reported |
 | `RecognitionModeToggle.jsx` | UI switch, disabled when no model is loaded |
 
-**What is missing is the dataset, not the code.** WLASL processed is several
+**What is missing is the dataset, not the code.** For ISL that is INCLUDE
+(<https://zenodo.org/record/4010759>); for ASL, WLASL processed is several
 gigabytes and the build brief requires asking before a download that size, so
 it has not been fetched. Once it is present, the four commands under "Running
 the pipeline" below produce a trained Model B with no further changes.
@@ -232,7 +295,7 @@ story — sequences, masking, signer-disjoint evaluation — and it is worth
 presenting as built-and-ready, but a live demo of a 60%-accurate model beside a
 90%-accurate one weakens the presentation rather than strengthening it.
 
-### The one thing Model B does better than Model A
+### The one thing Model B does better than Model A — on WLASL only
 
 Model A's honest limitation is that ASL Alphabet carries no signer metadata, so
 its test split measures "the same hands, later frames".
@@ -246,6 +309,10 @@ working, not a bug to tune away.
 
 `--split-strategy official` and `--split-strategy random` are provided for
 comparison, and the random one is explicitly labelled as leaky.
+
+**None of this applies to INCLUDE**, which records no signer identity — see
+"INCLUDE cannot support a signer-disjoint split" above. On ISL data the split
+falls back to stratified random and the manifest says so.
 
 ### Live inference is harder than the test split, for a structural reason
 

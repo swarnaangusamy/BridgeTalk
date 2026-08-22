@@ -58,6 +58,7 @@ from __future__ import annotations
 import argparse
 import json
 import multiprocessing as mp
+import re
 import sys
 import time
 from collections import Counter, defaultdict
@@ -80,7 +81,40 @@ from app.ml.normalization import (  # noqa: E402
     normalize_hands,
 )
 
-RAW_DIR = REPO_ROOT / "ml" / "data" / "raw" / "wlasl"
+RAW_ROOT = REPO_ROOT / "ml" / "data" / "raw"
+
+# --- Which word-sign dataset? -----------------------------------------------
+# WLASL ships a metadata JSON describing every clip: which gloss, which signer,
+# and which frames of the source video actually contain the sign. INCLUDE ships
+# folders — one per word — holding clips that are already trimmed.
+#
+# Those are genuinely different discovery problems, so each gets its own
+# function, but everything after discovery (landmark extraction, resampling,
+# reporting, output format) is shared.
+DATASETS = {
+    "wlasl": {
+        "dir": RAW_ROOT / "wlasl",
+        "title": "WLASL processed (American Sign Language)",
+        "language": "ASL",
+        "layout": "metadata-json",
+        "citation": (
+            "Li, D., Rodriguez, C., Yu, X., Li, H. Word-level Deep Sign Language "
+            "Recognition from Video. WACV 2020."
+        ),
+    },
+    "include": {
+        "dir": RAW_ROOT / "include",
+        "title": "INCLUDE (Indian Sign Language, word level)",
+        "language": "ISL",
+        "layout": "folders",
+        "citation": (
+            "Sridhar, A., Ganesan, R.G., Kumar, P., Khapra, M. INCLUDE: A Large "
+            "Scale Dataset for Indian Sign Language Recognition. ACM MM 2020."
+        ),
+    },
+}
+
+RAW_DIR = DATASETS["wlasl"]["dir"]  # rebound in main() once --dataset is known
 PROCESSED_DIR = REPO_ROOT / "ml" / "data" / "processed"
 HAND_MODEL = REPO_ROOT / "frontend" / "public" / "models" / "hand_landmarker.task"
 
@@ -168,6 +202,78 @@ def build_video_index(videos_root: Path) -> dict[str, Path]:
             index[item.stem.lstrip("0") or "0"] = item
             index[item.stem] = item
     return index
+
+
+def clean_class_name(name: str) -> str:
+    """Turn a folder name into a label.
+
+    INCLUDE numbers its word folders ("1. loud", "23. quiet"), and those
+    numbers are an artefact of the directory listing rather than part of the
+    word. Stripping them means the same word discovered under two categories
+    collapses to one class instead of two near-duplicates.
+    """
+    cleaned = name.strip()
+
+    # Leading "12." or "12 -" or "12_" numbering.
+    parts = re.split(r"^\s*\d+\s*[.\-_)]\s*", cleaned, maxsplit=1)
+    if len(parts) == 2 and parts[1]:
+        cleaned = parts[1]
+
+    return cleaned.strip().lower().replace("_", " ")
+
+
+def discover_folder_classes(
+    root: Path, num_glosses: int, limit_per_gloss: int
+) -> tuple[list[str], dict[str, list[dict]]]:
+    """Find word classes from directory structure, for INCLUDE.
+
+    Any directory holding video files is a class, and its (cleaned) name is the
+    label. INCLUDE nests words under category folders — Adjectives/, Animals/,
+    Greetings/ — and this walks through that without needing to know the
+    categories exist.
+
+    No signer metadata is available this way. That is recorded honestly as
+    signer_id -1 rather than invented, and preprocess_dynamic.py refuses to
+    claim a signer-disjoint split when it sees that.
+    """
+    by_class: dict[str, list[dict]] = defaultdict(list)
+
+    for directory in sorted(path for path in root.rglob("*") if path.is_dir()):
+        videos = sorted(
+            item for item in directory.iterdir()
+            if item.is_file() and item.suffix.lower() in VIDEO_SUFFIXES
+        )
+        if not videos:
+            continue
+
+        label = clean_class_name(directory.name)
+        if not label:
+            continue
+
+        for video in videos:
+            by_class[label].append(
+                {
+                    "video_id": video.stem,
+                    "path": str(video),
+                    # -1 means "not recorded by this dataset", NOT "signer 1".
+                    "signer_id": -1,
+                    # INCLUDE clips are already trimmed to a single sign, so
+                    # there is no sub-range to select: take the whole file.
+                    "frame_start": 1,
+                    "frame_end": -1,
+                    "official_split": "unknown",
+                }
+            )
+
+    ranked = sorted(by_class.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+    chosen = [label for label, _ in ranked[:num_glosses]]
+
+    selected = {}
+    for label in chosen:
+        clips = by_class[label]
+        selected[label] = clips[:limit_per_gloss] if limit_per_gloss else clips
+
+    return chosen, selected
 
 
 def select_glosses(
@@ -378,41 +484,89 @@ def main() -> int:
                         help="Cap clips per gloss (0 = no cap)")
     parser.add_argument("--dry-run", action="store_true",
                         help="3 clips per gloss, nothing written")
+    parser.add_argument(
+        "--dataset",
+        choices=sorted(DATASETS),
+        default="include",
+        help="include = Indian Sign Language words (default) · wlasl = ASL words",
+    )
     args = parser.parse_args()
 
     if not HAND_MODEL.is_file():
         print(f"ERROR: {HAND_MODEL} missing. Run ./scripts/setup.sh", file=sys.stderr)
         return 1
 
+    config = DATASETS[args.dataset]
+    raw_dir = config["dir"]
+    cap = 3 if args.dry_run else args.limit_per_gloss
+
+    print(f"Dataset:  {config['title']}")
+    print(f"Language: {config['language']}")
+
     # --- locate the dataset -------------------------------------------------
-    videos_root = find_videos_root(RAW_DIR)
-    metadata_path = find_metadata_json(RAW_DIR)
+    if config["layout"] == "folders":
+        # INCLUDE: one folder per word, clips already trimmed to a single sign.
+        if not raw_dir.is_dir():
+            print(f"\nERROR: {config['title']} not found under {raw_dir}",
+                  file=sys.stderr)
+            print("\nExpected one folder per word, at any nesting depth:",
+                  file=sys.stderr)
+            print(f"  {raw_dir.relative_to(REPO_ROOT)}/Adjectives/1. loud/*.mp4",
+                  file=sys.stderr)
+            print(f"  {raw_dir.relative_to(REPO_ROOT)}/Greetings/2. hello/*.mp4",
+                  file=sys.stderr)
+            print("\nDownload INCLUDE from:", file=sys.stderr)
+            print("  https://zenodo.org/record/4010759", file=sys.stderr)
+            return 1
 
-    if videos_root is None or metadata_path is None:
-        print(f"ERROR: WLASL not found under {RAW_DIR}", file=sys.stderr)
-        print("\nExpected:", file=sys.stderr)
-        print(f"  {RAW_DIR.relative_to(REPO_ROOT)}/videos/*.mp4", file=sys.stderr)
-        print(f"  {RAW_DIR.relative_to(REPO_ROOT)}/WLASL_v0.3.json", file=sys.stderr)
-        print("\nDownload it from:", file=sys.stderr)
-        print("  https://www.kaggle.com/datasets/risangbaskoro/wlasl-processed", file=sys.stderr)
-        print("\nThen verify with:", file=sys.stderr)
-        print("  python ml/scripts/download_datasets.py --dataset dynamic --verify",
-              file=sys.stderr)
-        return 1
+        glosses, instances_by_gloss = discover_folder_classes(
+            raw_dir, args.num_glosses, cap
+        )
 
-    print(f"Videos:   {videos_root}")
-    print(f"Metadata: {metadata_path.name}")
+        if not glosses:
+            print(f"\nERROR: no folder under {raw_dir} contains video files.",
+                  file=sys.stderr)
+            print("Check the archive extracted fully.", file=sys.stderr)
+            return 1
 
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    video_index = build_video_index(videos_root)
-    print(f"Files on disk: {len(set(video_index.values())):,}")
+        print(f"Layout:   folders ({len(glosses)} word classes discovered)")
 
-    glosses, instances_by_gloss = select_glosses(metadata, video_index, args.num_glosses)
+    else:
+        # WLASL: a metadata JSON drives everything.
+        videos_root = find_videos_root(raw_dir)
+        metadata_path = find_metadata_json(raw_dir)
 
-    if not glosses:
-        print("\nERROR: no gloss has any clip present on disk.", file=sys.stderr)
-        print("The metadata and the video folder do not appear to match.", file=sys.stderr)
-        return 1
+        if videos_root is None or metadata_path is None:
+            print(f"ERROR: WLASL not found under {raw_dir}", file=sys.stderr)
+            print("\nExpected:", file=sys.stderr)
+            print(f"  {raw_dir.relative_to(REPO_ROOT)}/videos/*.mp4", file=sys.stderr)
+            print(f"  {raw_dir.relative_to(REPO_ROOT)}/WLASL_v0.3.json", file=sys.stderr)
+            print("\nDownload it from:", file=sys.stderr)
+            print("  https://www.kaggle.com/datasets/risangbaskoro/wlasl-processed",
+                  file=sys.stderr)
+            return 1
+
+        print(f"Videos:   {videos_root}")
+        print(f"Metadata: {metadata_path.name}")
+
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        video_index = build_video_index(videos_root)
+        print(f"Files on disk: {len(set(video_index.values())):,}")
+
+        glosses, instances_by_gloss = select_glosses(
+            metadata, video_index, args.num_glosses
+        )
+
+        if not glosses:
+            print("\nERROR: no gloss has any clip present on disk.", file=sys.stderr)
+            print("The metadata and the video folder do not appear to match.",
+                  file=sys.stderr)
+            return 1
+
+        if cap:
+            instances_by_gloss = {
+                gloss: items[:cap] for gloss, items in instances_by_gloss.items()
+            }
 
     print(f"\nSelected {len(glosses)} glosses (ranked by clips actually present):")
     for gloss in glosses:
@@ -427,13 +581,9 @@ def main() -> int:
         print("  preprocess_dynamic.py reports coverage per split and will say so.")
 
     # --- build the job list -------------------------------------------------
-    cap = 3 if args.dry_run else args.limit_per_gloss
     jobs: list[dict] = []
     for gloss in glosses:
-        items = instances_by_gloss[gloss]
-        if cap:
-            items = items[:cap]
-        for item in items:
+        for item in instances_by_gloss[gloss]:
             jobs.append({**item, "gloss": gloss})
 
     print(f"\nExtracting {len(jobs):,} clips with {args.workers} workers")
@@ -507,7 +657,9 @@ def main() -> int:
 
     report = {
         "extracted_at": datetime.now(timezone.utc).isoformat(),
-        "source_dataset": "WLASL processed (risangbaskoro/wlasl-processed)",
+        "source_dataset": config["title"],
+        "language": config["language"],
+        "citation": config["citation"],
         "self_recorded_data": False,
         "normalization_version": NORMALIZATION_VERSION,
         "sequence_length": SEQUENCE_LENGTH,

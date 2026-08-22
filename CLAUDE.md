@@ -100,8 +100,11 @@ source .venv/bin/activate && pytest backend/tests -v
       Model C (ISL, two-handed) pipeline complete and tested end to end on
       synthetic data — **awaiting a dataset**; ISL is the demo alphabet.
       No ISL accuracy is claimed anywhere.
-      Model B pipeline complete and tested but **not trained** — WLASL is a
-      multi-GB download that has not been fetched. No accuracy is claimed.)
+      Model B (word-level) pipeline complete and tested end to end, and now
+      accepts INCLUDE (ISL words) as well as WLASL (ASL words) — **not
+      trained**, awaiting a dataset download. INCLUDE records no signer
+      identity, so its split falls back to random and `signer_disjoint` is
+      false everywhere. No accuracy is claimed for any untrained model.)
 - [x] Phase 5 — real-time inference over WebSocket
 - [x] Phase 6 — meeting room UI, WebRTC, speech-to-text
 - [x] Phase 7 — Interview Mode, polish, documentation
