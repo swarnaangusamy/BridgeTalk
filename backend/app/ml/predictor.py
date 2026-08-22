@@ -4,17 +4,23 @@ Models are loaded **once, at application startup**, and held in memory for the
 process lifetime. Loading per request would add hundreds of milliseconds to a
 system whose entire selling point is sub-second response.
 
-TWO MODELS, ONE CLASS
----------------------
-BridgeTalk ships two classifiers with genuinely different shapes:
+THREE MODELS, ONE CLASS
+-----------------------
+BridgeTalk ships three classifiers with genuinely different shapes:
 
-  * **Model A (static)** — 63 floats of one hand → a fingerspelled letter.
+  * **Model A (static)** — 63 floats of one hand → an ASL fingerspelled letter.
+  * **Model C (isl)** — 126 floats of two hands → an ISL fingerspelled letter.
   * **Model B (dynamic)** — a (30, 126) sequence of two-handed frames → a word.
+
+The ASL/ISL split is not a localisation setting. ASL fingerspells with one
+hand and ISL with two, so the feature vectors are different widths and one
+model's weights are not merely less accurate on the other's data — they are
+the wrong shape entirely.
 
 They differ in input shape, in which files they read, and in how good they are.
 They do **not** differ in how they must be loaded, version-guarded or failed
-safely, so that logic lives in one class configured twice rather than being
-copied. A second copy would be the obvious place for the version guard to
+safely, so that logic lives in one class configured three times rather than
+being copied. A second copy would be the obvious place for the version guard to
 quietly go missing from one of them.
 
 THE VERSION GUARD
@@ -269,6 +275,19 @@ predictor = SignPredictor(
     metadata_path=settings.model_metadata_path,
     input_shape=(SINGLE_HAND_FEATURES,),
     train_command="python ml/scripts/train_static.py",
+)
+
+# Indian Sign Language alphabet. Same MLP architecture as Model A and the same
+# "one frame is the whole answer" premise — but 126 features, because ISL
+# fingerspells with both hands where ASL uses one. That difference is why the
+# ASL model cannot simply be pointed at ISL data.
+isl_predictor = SignPredictor(
+    mode="isl",
+    model_path=settings.isl_model_path,
+    labels_path=settings.isl_labels_path,
+    metadata_path=settings.isl_metadata_path,
+    input_shape=(TWO_HAND_FEATURES,),
+    train_command="python ml/scripts/train_static.py --dataset isl",
 )
 
 dynamic_predictor = SignPredictor(

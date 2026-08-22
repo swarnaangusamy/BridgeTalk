@@ -40,7 +40,7 @@ When this file and the master prompt disagree, the master prompt wins.
 ## Hard constraints
 
 1. **Public datasets only.** All training data comes from published public
-   datasets (ASL Alphabet, WLASL). No self-recorded training data anywhere in
+   datasets (ASL Alphabet, an ISL alphabet set, WLASL). No self-recorded training data anywhere in
    the repo. `test_realtime.py` and `record_eval_clip.py` use the webcam only to
    *evaluate* an already-trained model — they never write training samples.
 2. **Landmarks leave the browser, video never does.** MediaPipe runs
@@ -97,6 +97,9 @@ source .venv/bin/activate && pytest backend/tests -v
 - [x] Phase 2 — meetings & transcripts API
 - [x] Phase 3 — dataset acquisition & landmark extraction
 - [x] Phase 4 — model training + evaluation (Model A trained: 90.5% test.
+      Model C (ISL, two-handed) pipeline complete and tested end to end on
+      synthetic data — **awaiting a dataset**; ISL is the demo alphabet.
+      No ISL accuracy is claimed anywhere.
       Model B pipeline complete and tested but **not trained** — WLASL is a
       multi-GB download that has not been fetched. No accuracy is claimed.)
 - [x] Phase 5 — real-time inference over WebSocket

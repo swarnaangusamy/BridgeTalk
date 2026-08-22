@@ -99,6 +99,89 @@ and the reason is recorded in `dataset_manifest.json` rather than left implicit.
 
 ---
 
+## Model C — Indian Sign Language alphabet
+
+**This is the alphabet BridgeTalk is being demonstrated with.** The demo signer
+signs ISL, so an ASL model would produce nonsense for them — not slightly worse
+output, but unrelated output.
+
+**Dataset:** chosen manually. `download_datasets.py` deliberately does **not**
+name one:
+
+    python ml/scripts/download_datasets.py --dataset isl --verify
+
+Several ISL alphabet datasets exist on Kaggle with different class sets and
+very different quality, and none has been verified here. Naming a slug we have
+not checked would be inventing a path. The verifier instead states the
+requirements, discovers whatever class folders are present, and reports whether
+the result is usable.
+
+### Why this is a separate model and not a retrained one
+
+**ISL fingerspells with two hands. ASL uses one.**
+
+That single fact propagates through the entire pipeline:
+
+| | ASL (Model A) | ISL (Model C) |
+|---|---|---|
+| Hands tracked | 1 | 2 |
+| Feature vector | 63 floats | **126 floats** |
+| Normalisation | `normalize_primary_hand` | `normalize_hands` (slotted by handedness) |
+| Mirroring | negate x | negate x **and swap hand slots** |
+| WebSocket mode | `static` | `isl` |
+
+Model A's weights are not merely less accurate on ISL data — they are the
+wrong shape. The backend's input-shape guard refuses to load one into the
+other's slot rather than failing later with a confusing TensorFlow error.
+
+Three things in the shared code needed care, and each would have trained
+happily while being wrong:
+
+- **Normalisation is per hand.** Each hand is centred on its own wrist and
+  scaled by its own furthest landmark. Treating the 42 points as one hand
+  would subtract the left wrist from the right hand's landmarks.
+- **Mirroring swaps the slots.** The vector is `[left(63), right(63)]` by
+  handedness. Negating x without swapping claims the left hand performed the
+  right hand's shape — a letter that exists in no alphabet.
+- **An absent hand stays exactly zero.** Several ISL letters are one-handed,
+  and MediaPipe loses a hand to occlusion constantly. Noise added to a zero
+  slot invents a hand that was never there.
+
+`backend/tests/test_isl_preprocessing.py` guards all three, and each test was
+verified to fail when its fix is removed.
+
+### Expect a higher discard rate than ASL
+
+Two hands in frame occlude one another, and MediaPipe loses landmarks it would
+have found on a single hand. ASL Alphabet — clean, studio-lit, one hand —
+already discarded 23.2% overall and 49% for N. ISL will be worse. Extraction
+reports the rate per class, and that number is worth reading before training:
+if it is very high, hand detection rather than the classifier is the limit.
+
+### Running it
+
+```bash
+python ml/scripts/download_datasets.py --dataset isl --verify
+python ml/scripts/extract_landmarks_images.py --dataset isl --limit-per-class 1500
+python ml/scripts/preprocess.py --dataset isl
+python ml/scripts/train_static.py --dataset isl
+python ml/scripts/evaluate.py \
+    --model ml/models/isl_model.keras --labels ml/models/labels_isl.json \
+    --prefix isl_ --report isl_evaluation_report.json \
+    --history isl_training_history.json --image-tag _isl
+```
+
+ISL arrays are written beside the ASL ones (`X_isl_train.npy` next to
+`X_train.npy`), so both models stay reproducible from one extraction run each
+and neither overwrites the other.
+
+**No accuracy is claimed here.** The pipeline has been smoke-tested end to end
+on synthetic two-handed landmarks — CSV → preprocess → train → the backend
+loading and predicting — but no ISL dataset has been trained on. Whatever
+number comes out of the run above is the first real one.
+
+---
+
 ## Model B — dynamic word signs (stretch goal)
 
 **Dataset (preferred):** WLASL processed — Kaggle `risangbaskoro/wlasl-processed`,

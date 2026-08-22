@@ -59,6 +59,12 @@ class Settings(BaseSettings):
     labels_path: str = "ml/models/labels.json"
     dynamic_metadata_path: str = "ml/models/dynamic_metadata.json"
     dynamic_labels_path: str = "ml/models/labels_dynamic.json"
+    # Indian Sign Language alphabet. Two-handed, so 126 features rather than
+    # 63 — ASL's weights are not merely less accurate here, they are the wrong
+    # shape, which is why this is a separate model and not a retrained one.
+    isl_model_path: str = "ml/models/isl_model.keras"
+    isl_metadata_path: str = "ml/models/isl_metadata.json"
+    isl_labels_path: str = "ml/models/labels_isl.json"
 
     # --- Real-time smoothing (Section 9 of the build spec) ----------------
     confidence_threshold: float = 0.80

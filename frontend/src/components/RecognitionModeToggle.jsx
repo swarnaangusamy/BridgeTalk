@@ -1,39 +1,34 @@
 /**
- * Switches between fingerspelling (Model A) and word signs (Model B).
+ * Switches between ASL fingerspelling, ISL fingerspelling and word signs.
  *
- * WHY THIS COMPONENT STATES THE ACCURACY DIFFERENCE
- * -------------------------------------------------
- * The two models are not equally good, and the gap is large. Model A reaches
- * 90.5% on held-out data; Model B is trained on roughly twenty clips per word
- * and evaluated against signers it has never seen, which is a far harder test
- * and produces a far lower number.
+ * WHY ASL AND ISL ARE SEPARATE MODES, NOT A LANGUAGE DROPDOWN
+ * -----------------------------------------------------------
+ * They route to different models with different input widths. ASL fingerspells
+ * with ONE hand (63 features); ISL fingerspells with TWO (126). The browser has
+ * to track a different number of hands for each, so this is a real mode change
+ * rather than a label swap — and presenting it as a cosmetic setting would
+ * invite the assumption that one model handles both. Neither can.
  *
- * Presenting them as two interchangeable tabs would imply a parity that does
- * not exist, and the person relying on the output is the one who would pay for
- * that impression. So the toggle carries the numbers, and word mode is labelled
- * experimental wherever it appears.
+ * WHY THE ACCURACY NUMBERS ARE ON THE BUTTONS
+ * -------------------------------------------
+ * The models are not equally good, and the gaps are large. Showing them as
+ * interchangeable tabs would imply a parity that does not exist, and the person
+ * relying on the output is the one who would pay for that impression.
  *
- * When the backend has no dynamic model — the normal configuration, since
- * Model B is a stretch goal — the option is disabled rather than hidden, with
- * the reason shown. A missing feature that explains itself is much easier to
- * work with than one that silently is not there.
+ * A mode whose model is not loaded is DISABLED with the server's reason shown,
+ * never hidden. A missing feature that explains itself is far easier to work
+ * with than one that silently is not there.
  */
 
 const MODES = [
-  {
-    id: 'static',
-    label: 'Letters',
-    hint: 'Fingerspelling, A–Z',
-  },
-  {
-    id: 'dynamic',
-    label: 'Words',
-    hint: 'Word signs (experimental)',
-  },
+  { id: 'static', label: 'ASL', hint: 'Fingerspelling · one hand' },
+  { id: 'isl', label: 'ISL', hint: 'Fingerspelling · two hands' },
+  { id: 'dynamic', label: 'Words', hint: 'Word signs · experimental' },
 ];
 
-function accuracyText(info) {
-  if (!info?.loaded) return null;
+function summarise(info) {
+  if (!info) return 'not available';
+  if (!info.loaded) return 'no model loaded';
   if (info.val_accuracy == null) return `${info.classes} classes`;
   return `${info.classes} classes · ${(info.val_accuracy * 100).toFixed(1)}% validation`;
 }
@@ -42,9 +37,17 @@ export default function RecognitionModeToggle({
   mode,
   onChange,
   staticModelInfo,
+  islModelInfo,
   dynamicModelInfo,
 }) {
-  const dynamicAvailable = Boolean(dynamicModelInfo?.loaded);
+  const infoFor = {
+    static: staticModelInfo,
+    isl: islModelInfo,
+    dynamic: dynamicModelInfo,
+  };
+
+  const active = infoFor[mode];
+  const activeAvailable = Boolean(active?.loaded);
 
   return (
     <section aria-labelledby="recognition-mode-heading" className="flex flex-col gap-2">
@@ -57,8 +60,8 @@ export default function RecognitionModeToggle({
 
       <div role="radiogroup" aria-labelledby="recognition-mode-heading" className="flex gap-2">
         {MODES.map((option) => {
-          const isDynamic = option.id === 'dynamic';
-          const disabled = isDynamic && !dynamicAvailable;
+          const info = infoFor[option.id];
+          const disabled = !info?.loaded;
           const selected = mode === option.id;
 
           return (
@@ -68,6 +71,7 @@ export default function RecognitionModeToggle({
               role="radio"
               aria-checked={selected}
               disabled={disabled}
+              title={disabled ? info?.error ?? 'No model loaded' : undefined}
               onClick={() => onChange(option.id)}
               className={[
                 'flex-1 rounded-lg border px-3 py-2 text-left transition-colors',
@@ -84,31 +88,22 @@ export default function RecognitionModeToggle({
         })}
       </div>
 
-      {/* Provenance for whichever model is active, so the number on screen is
+      {/* Provenance for whichever model is active, so the letter on screen is
           never separated from how reliable it is. */}
       <p className="text-xs text-slate-400">
-        {mode === 'dynamic' ? (
-          dynamicAvailable ? (
-            <>
-              Word signs · {accuracyText(dynamicModelInfo)}
-              {dynamicModelInfo?.signer_disjoint && (
-                <> · tested on unseen signers</>
-              )}
-            </>
-          ) : (
-            <>Word-sign model unavailable.</>
-          )
-        ) : (
-          <>Fingerspelling · {accuracyText(staticModelInfo) ?? 'no model loaded'}</>
-        )}
+        {MODES.find((option) => option.id === mode)?.label}
+        {' · '}
+        {summarise(active)}
+        {mode === 'dynamic' && active?.signer_disjoint && ' · tested on unseen signers'}
       </p>
 
-      {!dynamicAvailable && (
-        <p className="rounded-lg border border-ink-700 bg-ink-900 p-2 text-xs text-slate-400">
-          <strong className="text-slate-300">Word signs unavailable.</strong>{' '}
-          {dynamicModelInfo?.error ??
-            'No dynamic model is loaded on this server.'}{' '}
-          Fingerspelling is unaffected.
+      {!activeAvailable && (
+        <p
+          className="rounded-lg border border-signal-warn/40 bg-signal-warn/10 p-2 text-xs text-slate-300"
+          role="status"
+        >
+          <strong className="text-slate-100">This mode is unavailable.</strong>{' '}
+          {active?.error ?? 'No model is loaded on this server.'}
         </p>
       )}
     </section>

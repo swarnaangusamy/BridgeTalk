@@ -34,7 +34,12 @@ from sqlalchemy import select
 from app.core.security import decode_access_token
 from app.database import SessionLocal
 from app.ml.normalization import normalize_hands, normalize_primary_hand
-from app.ml.predictor import ModelNotLoadedError, dynamic_predictor, predictor
+from app.ml.predictor import (
+    ModelNotLoadedError,
+    dynamic_predictor,
+    isl_predictor,
+    predictor,
+)
 from app.ml.sequence import SequenceBuffer
 from app.ml.smoothing import NEUTRAL_LABEL, PredictionSmoother, SmoothingConfig
 from app.models.meeting import Meeting
@@ -50,12 +55,17 @@ router = APIRouter()
 WS_POLICY_VIOLATION = 1008
 WS_INTERNAL_ERROR = 1011
 
-# The two recognition modes. Anything else is rejected rather than silently
+# The three recognition modes. Anything else is rejected rather than silently
 # treated as static — a client sending "STATIC" or "letters" should be told it
 # is wrong, not quietly given behaviour it did not ask for.
-STATIC_MODE = "static"
-DYNAMIC_MODE = "dynamic"
-VALID_MODES = frozenset({STATIC_MODE, DYNAMIC_MODE})
+#
+# ASL and ISL are separate modes rather than a language flag on one mode
+# because they genuinely route to different models with different input
+# widths, and the client must track a different number of hands for each.
+STATIC_MODE = "static"     # ASL fingerspelling — one hand, 63 features
+ISL_MODE = "isl"           # ISL fingerspelling — two hands, 126 features
+DYNAMIC_MODE = "dynamic"   # word signs — a (30, 126) sequence
+VALID_MODES = frozenset({STATIC_MODE, ISL_MODE, DYNAMIC_MODE})
 
 
 def _authenticate(token: str) -> User | None:
@@ -150,6 +160,69 @@ def _handle_static_frame(
         # Server receive-to-send time. Surfacing a real number the UI can
         # display is worth a lot in a review — it turns "it feels fast" into
         # "38 milliseconds".
+        "latency_ms": round((time.perf_counter() - received_at) * 1000, 1),
+        "_result": result,
+    }
+
+
+def _handle_isl_frame(
+    hands: list[dict[str, Any]],
+    smoother: PredictionSmoother,
+    received_at: float,
+) -> dict[str, Any] | None:
+    """One frame through Model C: two hand shapes become an ISL letter.
+
+    Structurally identical to the static path — one frame is the whole answer,
+    so there is no buffering and no sequence. The only difference is the
+    feature vector: `normalize_hands` produces 126 floats with a fixed slot per
+    hand, where ASL's `normalize_primary_hand` produces 63 for one hand.
+
+    Slotting by handedness rather than detection order is what makes a
+    two-handed alphabet learnable at all. MediaPipe reports hands in whatever
+    order it found them, so without it the same letter would land in two
+    different arrangements from frame to frame.
+    """
+    if not hands:
+        result = smoother.push(None, 0.0)
+        return {
+            "type": "prediction",
+            "mode": ISL_MODE,
+            "label": NEUTRAL_LABEL,
+            "confidence": 0.0,
+            "stable": False,
+            "sentence": result.sentence,
+            "hand_detected": False,
+            "hands_seen": 0,
+            "latency_ms": round((time.perf_counter() - received_at) * 1000, 1),
+            "_result": result,
+        }
+
+    try:
+        features = normalize_hands(hands)
+    except (ValueError, TypeError) as exc:
+        return _error("INVALID_MESSAGE", f"Bad landmark data: {exc}")
+
+    try:
+        label, confidence, _ = isl_predictor.predict(features)
+    except ModelNotLoadedError as exc:
+        return _error("MODEL_NOT_LOADED", str(exc))
+    except ValueError as exc:
+        return _error("INVALID_MESSAGE", str(exc))
+
+    result = smoother.push(label, confidence)
+
+    return {
+        "type": "prediction",
+        "mode": ISL_MODE,
+        "label": result.label,
+        "confidence": round(result.confidence, 4),
+        "stable": result.stable,
+        "emitted": result.emitted,
+        "sentence": result.sentence,
+        "hand_detected": True,
+        # Surfaced so the UI can say "only one hand visible" on a letter that
+        # needs two — by far the most common reason an ISL prediction is wrong.
+        "hands_seen": len(hands),
         "latency_ms": round((time.perf_counter() - received_at) * 1000, 1),
         "_result": result,
     }
@@ -291,6 +364,10 @@ async def predict_socket(
     # continuous piece of text.
     smoothers = {
         STATIC_MODE: PredictionSmoother(),
+        # ISL letters concatenate exactly like ASL letters, so word_mode stays
+        # off and the static thresholds apply. The alphabet differs; the
+        # business of turning a stream of letters into text does not.
+        ISL_MODE: PredictionSmoother(),
         DYNAMIC_MODE: PredictionSmoother(SmoothingConfig.for_dynamic(), word_mode=True),
     }
     buffer = SequenceBuffer()
@@ -308,8 +385,9 @@ async def predict_socket(
             "meeting_code": normalized_code,
             "user": {"id": user.id, "name": user.name},
             "model": predictor.describe(),
-            # Advertised so the UI can enable or hide the word-sign toggle
-            # rather than offering a mode that cannot work on this deployment.
+            # Advertised so the UI can enable or hide each mode rather than
+            # offering one that cannot work on this deployment.
+            "isl_model": isl_predictor.describe(),
             "dynamic_model": dynamic_predictor.describe(),
             "config": {
                 "confidence_threshold": smoother.config.confidence_threshold,
@@ -425,6 +503,8 @@ async def predict_socket(
 
             if requested_mode == DYNAMIC_MODE:
                 result_message = _handle_dynamic_frame(hands, buffer, smoother, received_at)
+            elif requested_mode == ISL_MODE:
+                result_message = _handle_isl_frame(hands, smoother, received_at)
             else:
                 result_message = _handle_static_frame(hands, smoother, received_at)
 

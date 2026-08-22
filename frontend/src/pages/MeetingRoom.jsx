@@ -177,6 +177,7 @@ export default function MeetingRoom() {
     serverError: signError,
     modelInfo,
     dynamicModelInfo,
+    islModelInfo,
     sendLandmarks,
     sendSpeech,
     clearSentence,
@@ -187,12 +188,13 @@ export default function MeetingRoom() {
     onSubtitle: handleIncomingSubtitle,
   });
 
-  // One hand for fingerspelling, two for word signs — Model B's features have
-  // a slot for each hand and tracking only one would leave half of every input
-  // zero. See RecognitionModeToggle for why the two modes are not equivalent.
+  // One hand for ASL fingerspelling, two for ISL fingerspelling and word signs.
+  // Their features have a slot per hand, and tracking only one would leave half
+  // of every input zero. See RecognitionModeToggle for why these are separate
+  // modes rather than a language setting.
   const { detect, status: landmarkerStatus, error: landmarkerError, isReady } =
     useHandLandmarker({
-      numHands: recognitionMode === 'dynamic' ? 2 : 1,
+      numHands: recognitionMode === 'static' ? 1 : 2,
       enabled: signDetectionOn,
     });
 
@@ -501,6 +503,7 @@ export default function MeetingRoom() {
             serverError={signError}
             modelInfo={modelInfo}
             dynamicModelInfo={dynamicModelInfo}
+            islModelInfo={islModelInfo}
             handDetected={handDetected}
             mode={recognitionMode}
             onModeChange={setRecognitionMode}

@@ -2,9 +2,11 @@
   "source_dataset": "ASL Alphabet (grassknoted/asl-alphabet)",
   "source_url": "https://www.kaggle.com/datasets/grassknoted/asl-alphabet",
   "self_recorded_data": false,
-  "created_at": "2026-08-16T12:48:03.569163+00:00",
+  "created_at": "2026-08-22T05:47:39.266532+00:00",
   "normalization_version": 1,
   "feature_count": 63,
+  "num_hands": 1,
+  "alphabet": "ASL Alphabet (grassknoted/asl-alphabet)",
   "classes": [
     "A",
     "B",

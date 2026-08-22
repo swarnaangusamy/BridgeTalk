@@ -1,4 +1,5 @@
 {
+  "model": "static_model.keras",
   "split": "test",
   "samples": 6440,
   "classes": [

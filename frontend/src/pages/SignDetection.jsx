@@ -40,11 +40,12 @@ export default function SignDetection() {
   const [detecting, setDetecting] = useState(true);
   const [mode, setMode] = useState('static');
 
-  // Fingerspelling is one-handed, so tracking a second hand would be wasted
-  // work. Word signs frequently use both, and Model B's 126-wide features have
-  // a slot for each — tracking only one would leave half of every input zero.
+  // ASL fingerspelling is one-handed, so tracking a second hand there would be
+  // wasted work. ISL fingerspelling and word signs both use two, and their
+  // 126-wide features have a slot for each — tracking only one would leave half
+  // of every input vector zero.
   const { detect, status: modelStatus, error: modelError, isReady } = useHandLandmarker({
-    numHands: mode === 'dynamic' ? 2 : 1,
+    numHands: mode === 'static' ? 1 : 2,
     enabled: true,
   });
 
@@ -58,6 +59,7 @@ export default function SignDetection() {
     serverError,
     modelInfo,
     dynamicModelInfo,
+    islModelInfo,
     sendLandmarks,
     clearSentence,
     backspace,
@@ -271,6 +273,7 @@ export default function SignDetection() {
           serverError={serverError}
           modelInfo={modelInfo}
           dynamicModelInfo={dynamicModelInfo}
+          islModelInfo={islModelInfo}
           handDetected={handDetected}
           mode={mode}
           onModeChange={setMode}

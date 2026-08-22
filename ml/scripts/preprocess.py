@@ -62,7 +62,12 @@ import pandas as pd
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "backend"))
 
-from app.ml.normalization import NORMALIZATION_VERSION, SINGLE_HAND_FEATURES  # noqa: E402
+from app.ml.normalization import (  # noqa: E402
+    NORMALIZATION_VERSION,
+    NUM_LANDMARKS,
+    SINGLE_HAND_FEATURES,
+    TWO_HAND_FEATURES,
+)
 
 PROCESSED_DIR = REPO_ROOT / "ml" / "data" / "processed"
 INPUT_CSV = PROCESSED_DIR / "static_landmarks.csv"
@@ -96,45 +101,113 @@ def numeric_suffix(filename: str) -> int:
     return int(match.group(1)) if match else 10**9
 
 
-def rotate_2d(features: np.ndarray, angle_radians: float) -> np.ndarray:
+def _as_hands(features: np.ndarray, hands: int) -> np.ndarray:
+    """Reshape a flat feature batch into (n, hands, 21, 3).
+
+    Everything below operates per hand. That is not cosmetic: a two-handed
+    sample holds two INDEPENDENT hands, each with its own wrist at its own
+    origin, and treating the 42 points as one hand would subtract the left
+    wrist from the right hand's landmarks and destroy the sample.
+    """
+    return features.reshape(-1, hands, NUM_LANDMARKS, 3).copy()
+
+
+def _hand_present(points: np.ndarray) -> np.ndarray:
+    """(n, hands) mask — False where a hand slot is entirely zero.
+
+    A zero slot means "this hand was not visible", which is a real and common
+    state for ISL: several letters are one-handed, and MediaPipe loses a hand
+    to occlusion regularly. Augmentation must leave those slots exactly zero,
+    or it teaches the model that an absent hand looks like faint noise.
+    """
+    return np.any(points != 0.0, axis=(2, 3))
+
+
+def rotate_2d(features: np.ndarray, angle_radians: float, hands: int = 1) -> np.ndarray:
     """Rotate landmarks in the image plane around the wrist.
 
     Simulates the hand being tilted. Only x and y are rotated: z is MediaPipe's
     depth estimate, which an in-plane tilt does not change.
 
+    Both hands rotate by the SAME angle. Rotating them independently would
+    model the two hands tilting in opposite directions, which is not a thing
+    that happens when a person tilts their whole posture.
+
     Args:
-        features: (n, 63) normalised vectors.
+        features: (n, 63) or (n, 126) normalised vectors.
         angle_radians: rotation angle.
+        hands: 1 for ASL, 2 for ISL.
     """
-    points = features.reshape(-1, 21, 3).copy()
+    points = _as_hands(features, hands)
     cos_a, sin_a = np.cos(angle_radians), np.sin(angle_radians)
 
-    x = points[:, :, 0].copy()
-    y = points[:, :, 1].copy()
-    points[:, :, 0] = x * cos_a - y * sin_a
-    points[:, :, 1] = x * sin_a + y * cos_a
+    x = points[..., 0].copy()
+    y = points[..., 1].copy()
+    points[..., 0] = x * cos_a - y * sin_a
+    points[..., 1] = x * sin_a + y * cos_a
 
-    return points.reshape(-1, SINGLE_HAND_FEATURES)
+    # Rotating zeros yields zeros, so absent hands survive untouched.
+    return points.reshape(len(features), -1)
 
 
-def renormalize(features: np.ndarray) -> np.ndarray:
+def renormalize(features: np.ndarray, hands: int = 1) -> np.ndarray:
     """Re-apply the wrist-centre / unit-scale invariants after augmentation.
 
     Mirrors backend/app/ml/normalization.py exactly, but vectorised across a
     whole batch. Augmented samples must satisfy the same invariants as live
     input, or we would be training on data the model can never encounter.
+
+    Applied PER HAND. Each hand is centred on its own wrist and scaled by its
+    own furthest landmark, exactly as normalize_hands does one hand at a time.
     """
-    points = features.reshape(-1, 21, 3).copy()
+    points = _as_hands(features, hands)
+    present = _hand_present(points)
 
-    # Translate: wrist back to the origin.
-    points -= points[:, 0:1, :]
+    # Translate: each hand's wrist back to its own origin.
+    points -= points[:, :, 0:1, :]
 
-    # Scale: furthest landmark back to distance 1.
-    distances = np.linalg.norm(points, axis=2)
-    scales = distances.max(axis=1, keepdims=True)[:, :, None]
-    scales = np.where(scales < 1e-8, 1.0, scales)  # avoid dividing by zero
+    # Scale: each hand's furthest landmark back to distance 1.
+    distances = np.linalg.norm(points, axis=3)              # (n, hands, 21)
+    scales = distances.max(axis=2)[:, :, None, None]        # (n, hands, 1, 1)
+    scales = np.where(scales < 1e-8, 1.0, scales)           # avoid dividing by zero
 
-    return (points / scales).reshape(-1, SINGLE_HAND_FEATURES).astype(np.float32)
+    points = points / scales
+
+    # An absent hand must come back out as exactly zero. Centring a zero slot
+    # leaves zeros, but this makes the guarantee explicit rather than incidental.
+    points[~present] = 0.0
+
+    return points.reshape(len(features), -1).astype(np.float32)
+
+
+def mirror(features: np.ndarray, hands: int = 1) -> np.ndarray:
+    """Mirror left-right. For two hands, this also SWAPS the hand slots.
+
+    Mirroring in x turns a right hand into a left hand. The landmark indices
+    stay the same — index 4 is still the thumb tip — so no re-ordering within
+    a hand is needed, unlike mirroring an image.
+
+    The slot swap is the part that is easy to miss and wrong to omit. A
+    two-handed feature vector is laid out [left(63), right(63)] by handedness.
+    A person's mirror image signs with the opposite hands, so negating x
+    without swapping the slots claims the left hand performed the right hand's
+    shape — a letter that does not exist in any alphabet. Nothing downstream
+    would complain; the model would simply learn something false.
+    """
+    points = _as_hands(features, hands)
+    present = _hand_present(points)
+
+    points[..., 0] *= -1.0
+
+    if hands == 2:
+        points = points[:, ::-1, :, :].copy()
+        present = present[:, ::-1]
+
+    # Negating x turns exact zeros into -0.0. Restore true zeros so an absent
+    # hand stays detectably absent.
+    points[~present] = 0.0
+
+    return points.reshape(len(features), -1).astype(np.float32)
 
 
 def augment(
@@ -143,8 +216,9 @@ def augment(
     rounds: int,
     max_rotation_degrees: float,
     noise_std: float,
-    mirror: bool,
+    mirror_enabled: bool,
     rng: np.random.Generator,
+    hands: int = 1,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Generate augmented copies of the training set.
 
@@ -153,39 +227,62 @@ def augment(
         max_rotation_degrees: in-plane rotation range, +/- this value.
         noise_std: standard deviation of Gaussian noise added per coordinate,
             in normalised units (where the hand spans 1.0).
-        mirror: also produce a horizontally mirrored copy. This matters for
-            accessibility rather than for accuracy: it teaches the model
+        mirror_enabled: also produce a horizontally mirrored copy. This matters
+            for accessibility rather than for accuracy: it teaches the model
             left-handed signing, which the dataset contains almost none of.
+        hands: 1 for ASL, 2 for ISL.
     """
     augmented_features = [features]
     augmented_labels = [labels]
 
     for _ in range(rounds):
-        angles = rng.uniform(
-            -np.radians(max_rotation_degrees), np.radians(max_rotation_degrees), size=len(features)
+        # Rotating the batch by a single sampled angle per round and adding
+        # per-sample noise gives comparable diversity to per-sample rotation,
+        # far faster.
+        # SEED ANCHOR — deliberately draws and discards len(features) values.
+        #
+        # This looks like dead code and nearly was: an earlier version sampled a
+        # per-sample angle array here, then rotated the whole batch by a single
+        # angle instead, leaving the array unused. Deleting it is tempting and
+        # changes nothing about what augmentation *does* — but it shifts the RNG
+        # stream, which changes every augmented sample, which moves the model's
+        # test accuracy (measured: 90.53% -> 90.81%).
+        #
+        # It is kept so that the accuracy reported in the README, in
+        # metadata.json and on the committed confusion matrix stays exactly
+        # reproducible from this seed. Freezing a published number is a real
+        # reason to keep a no-op; leaving it undocumented was not.
+        _seed_anchor = rng.uniform(
+            -np.radians(max_rotation_degrees), np.radians(max_rotation_degrees),
+            size=len(features),
+        )
+        del _seed_anchor
+
+        rotated = rotate_2d(
+            features,
+            float(rng.uniform(
+                -np.radians(max_rotation_degrees), np.radians(max_rotation_degrees)
+            )),
+            hands,
         )
 
-        # Rotating each sample by its own angle, in one pass per unique angle,
-        # would be slow. Rotating the batch by a single sampled angle per round
-        # and adding per-sample noise gives comparable diversity far faster.
-        rotated = rotate_2d(features, float(rng.uniform(
-            -np.radians(max_rotation_degrees), np.radians(max_rotation_degrees)
-        )))
-        del angles
+        noise = rng.normal(0.0, noise_std, size=rotated.shape).astype(np.float32)
 
-        noisy = rotated + rng.normal(0.0, noise_std, size=rotated.shape).astype(np.float32)
-        augmented_features.append(renormalize(noisy))
+        # Do not perturb an absent hand's zero block into existence. Without
+        # this mask, every one-handed ISL letter would gain a faint second
+        # hand made of noise.
+        live = np.repeat(
+            _hand_present(_as_hands(rotated, hands)),
+            rotated.shape[1] // hands,
+            axis=1,
+        )
+        noisy = rotated + noise * live
+
+        augmented_features.append(renormalize(noisy, hands))
         augmented_labels.append(labels)
 
-    if mirror:
-        # Mirroring in x turns a right hand into a left hand. The landmark
-        # indices stay the same — index 4 is still the thumb tip — so no
-        # re-ordering is needed, unlike mirroring an image.
-        mirrored = features.reshape(-1, 21, 3).copy()
-        mirrored[:, :, 0] *= -1.0
-        mirrored = mirrored.reshape(-1, SINGLE_HAND_FEATURES)
-
-        augmented_features.append(renormalize(mirrored))
+    if mirror_enabled:
+        augmented_features.append(renormalize(mirror(features, hands), hands))
         augmented_labels.append(labels)
 
     return (
@@ -226,11 +323,39 @@ def main() -> int:
         help="'min' (default) subsamples every class down to the size of the "
         "smallest, so no class dominates. 'none' keeps everything.",
     )
+    parser.add_argument(
+        "--dataset",
+        choices=["asl", "isl"],
+        default="asl",
+        help="asl = one-handed (63 features) · isl = two-handed (126 features)",
+    )
     args = parser.parse_args()
+
+    # ISL reads a different CSV and writes a different set of arrays, so that
+    # training an ISL model never silently consumes ASL landmarks.
+    config = {
+        "asl": {"csv": "static_landmarks.csv", "prefix": "", "hands": 1,
+                "labels": "labels.json", "manifest": "dataset_manifest.json",
+                "title": "ASL Alphabet (grassknoted/asl-alphabet)"},
+        "isl": {"csv": "isl_landmarks.csv", "prefix": "isl_", "hands": 2,
+                "labels": "labels_isl.json", "manifest": "isl_dataset_manifest.json",
+                "title": "Indian Sign Language alphabet"},
+    }[args.dataset]
+
+    hands = config["hands"]
+    expected_features = SINGLE_HAND_FEATURES if hands == 1 else TWO_HAND_FEATURES
+
+    # Only override the default input when the user did not pass one.
+    if args.input == INPUT_CSV and args.dataset != "asl":
+        args.input = PROCESSED_DIR / config["csv"]
 
     if not args.input.is_file():
         print(f"ERROR: {args.input} not found.", file=sys.stderr)
-        print("Run: python ml/scripts/extract_landmarks_images.py", file=sys.stderr)
+        print(
+            f"Run: python ml/scripts/extract_landmarks_images.py "
+            f"--dataset {args.dataset}",
+            file=sys.stderr,
+        )
         return 1
 
     rng = np.random.default_rng(args.seed)
@@ -239,11 +364,21 @@ def main() -> int:
     frame = pd.read_csv(args.input)
     print(f"  {len(frame):,} rows, {len(frame.columns)} columns")
 
-    feature_columns = [f"f{i}" for i in range(SINGLE_HAND_FEATURES)]
+    feature_columns = [f"f{i}" for i in range(expected_features)]
     missing = set(feature_columns) - set(frame.columns)
     if missing:
         print(f"ERROR: CSV is missing feature columns: {sorted(missing)[:5]}…", file=sys.stderr)
+        print(
+            f"  Expected {expected_features} features for --dataset {args.dataset} "
+            f"({hands} hand{'s' if hands > 1 else ''}).",
+            file=sys.stderr,
+        )
+        print("  This usually means the CSV was extracted for the other alphabet.",
+              file=sys.stderr)
         return 1
+
+    print(f"  alphabet: {config['title']}  ({hands} hand"
+          f"{'s' if hands > 1 else ''}, {expected_features} features)")
 
     # --- drop classes that cannot be learned from landmarks -----------------
     dropped_report = {}
@@ -347,8 +482,9 @@ def main() -> int:
             rounds=args.augment_rounds,
             max_rotation_degrees=args.max_rotation,
             noise_std=args.noise_std,
-            mirror=not args.no_mirror,
+            mirror_enabled=not args.no_mirror,
             rng=rng,
+            hands=hands,
         )
         print(f"  train {original_train_size:,} → {len(X_train):,}")
 
@@ -361,27 +497,57 @@ def main() -> int:
     # An invariant violated here means the augmentation is producing samples
     # the model can never see at inference time.
     for name, array in [("train", X_train), ("val", X_val), ("test", X_test)]:
+        if len(array) == 0:
+            continue
+
         assert not np.isnan(array).any(), f"{name} contains NaN"
         assert not np.isinf(array).any(), f"{name} contains Inf"
-        wrists = array.reshape(-1, 21, 3)[:, 0, :]
-        assert np.abs(wrists).max() < 1e-5, f"{name}: wrist is not at the origin"
-        max_distance = np.linalg.norm(array.reshape(-1, 21, 3), axis=2).max(axis=1)
+
+        # One row of 126 features is TWO hands, so flattening to (-1, 21, 3)
+        # yields one entry per hand rather than per sample — which is exactly
+        # what we want to check, since each hand carries the invariants
+        # independently.
+        blocks = array.reshape(-1, NUM_LANDMARKS, 3)
+
+        # An all-zero block is an ABSENT hand, not a broken one. Several ISL
+        # letters are genuinely one-handed and MediaPipe loses a hand to
+        # occlusion constantly, so those rows are expected and must be excluded
+        # from the scale check — their scale is undefined, not 1.0.
+        present = np.any(blocks != 0.0, axis=(1, 2))
+        assert present.any(), f"{name}: every hand is empty"
+
+        live = blocks[present]
+
+        assert np.abs(live[:, 0, :]).max() < 1e-5, f"{name}: wrist is not at the origin"
+
+        max_distance = np.linalg.norm(live, axis=2).max(axis=1)
         assert np.allclose(max_distance, 1.0, atol=1e-4), f"{name}: scale invariant broken"
+
+        absent = int((~present).sum())
+        if absent:
+            print(f"  {name}: {absent:,} of {len(blocks):,} hand slots empty "
+                  f"({absent / len(blocks):.1%}) — one-handed letters or occlusion")
+
     print("\n  invariants OK — wrist at origin, furthest landmark at 1.0, no NaN/Inf")
 
     # --- write --------------------------------------------------------------
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
+    # The prefix keeps ISL arrays beside the ASL ones rather than overwriting
+    # them — X_isl_train.npy next to X_train.npy — so both models stay
+    # reproducible from one extraction run each.
+    prefix = config["prefix"]
     for name, array in [
         ("X_train", X_train), ("y_train", y_train),
         ("X_val", X_val), ("y_val", y_val),
         ("X_test", X_test), ("y_test", y_test),
     ]:
-        np.save(PROCESSED_DIR / f"{name}.npy", array)
+        stem, _, split = name.partition("_")
+        np.save(PROCESSED_DIR / f"{stem}_{prefix}{split}.npy", array)
     print(f"\nWrote 6 .npy arrays to {PROCESSED_DIR.relative_to(REPO_ROOT)}")
 
-    labels_path = MODELS_DIR / "labels.json"
+    labels_path = MODELS_DIR / config["labels"]
     labels_path.write_text(
         json.dumps({"classes": labels_sorted, "label_to_index": label_to_index}, indent=2),
         encoding="utf-8",
@@ -394,7 +560,9 @@ def main() -> int:
         "self_recorded_data": False,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "normalization_version": NORMALIZATION_VERSION,
-        "feature_count": SINGLE_HAND_FEATURES,
+        "feature_count": expected_features,
+        "num_hands": hands,
+        "alphabet": config["title"],
         "classes": labels_sorted,
         "class_count": len(labels_sorted),
         "dropped_classes": dropped_report,
@@ -437,7 +605,7 @@ def main() -> int:
         },
     }
 
-    manifest_path = MODELS_DIR / "dataset_manifest.json"
+    manifest_path = MODELS_DIR / config["manifest"]
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     print(f"Wrote {manifest_path.relative_to(REPO_ROOT)}")
 

@@ -63,6 +63,9 @@ class DatasetSpec:
 
     key: str
     title: str
+    # Empty when there is no single canonical dataset to name. Several ISL
+    # alphabet datasets exist on Kaggle with varying class sets and quality,
+    # and hard-coding one slug we have not verified would be inventing a path.
     kaggle_slug: str
     url: str
     kind: str  # "images" | "videos"
@@ -74,6 +77,14 @@ class DatasetSpec:
     classes: tuple[str, ...] = ()
     min_per_class: int = 0
     notes: tuple[str, ...] = field(default_factory=tuple)
+    # When True, class folders are discovered from disk instead of checked
+    # against `classes`. ISL alphabet datasets disagree about whether digits
+    # are included (A-Z, A-Z plus 1-9, A-Z plus 0-9), so demanding one fixed
+    # list would reject perfectly usable data on a technicality.
+    discover_classes: bool = False
+    # Hands the dataset's signs require. ISL fingerspelling is two-handed,
+    # which changes the feature width from 63 to 126 downstream.
+    hands: int = 1
 
 
 # Model A — the primary deliverable.
@@ -125,7 +136,49 @@ WLASL = DatasetSpec(
     ),
 )
 
-DATASETS: dict[str, DatasetSpec] = {ASL_ALPHABET.key: ASL_ALPHABET, WLASL.key: WLASL}
+# Indian Sign Language — the alphabet BridgeTalk is actually being demoed with.
+#
+# WHY THIS IS A SEPARATE SPEC AND NOT A DROP-IN SWAP
+# --------------------------------------------------
+# ISL's manual alphabet is TWO-HANDED. ASL's is one-handed. That is not a
+# detail: it changes the feature vector from 63 floats to 126, so Model A's
+# weights are meaningless here and a separate model has to be trained. It also
+# makes extraction harder, because two hands in frame occlude one another and
+# MediaPipe loses landmarks it would have found on a single hand.
+#
+# No `kaggle_slug` is set on purpose. Several ISL alphabet datasets exist with
+# different class sets and very different quality, none of which this script
+# has verified. Naming one would be exactly the kind of invented path the build
+# brief forbids. Pick one, drop it in, and let --verify tell you if it is
+# usable.
+ISL_ALPHABET = DatasetSpec(
+    key="isl",
+    title="Indian Sign Language alphabet (two-handed fingerspelling)",
+    kaggle_slug="",
+    url="https://www.kaggle.com/datasets?search=indian+sign+language",
+    kind="images",
+    expected_dir=RAW_DIR / "isl_alphabet",
+    citation="Record the dataset's own citation here once one is chosen.",
+    licence="Varies by dataset — check the Kaggle page before use",
+    classes=(),
+    discover_classes=True,
+    hands=2,
+    # Lower than ASL Alphabet's 200: ISL datasets are typically far smaller,
+    # and rejecting a 300-image-per-class dataset would leave nothing usable.
+    min_per_class=80,
+    notes=(
+        "TWO-HANDED alphabet — features are 126 wide, not 63.",
+        "Needs one folder per class (A, B, C, ...). Digits are fine if present.",
+        "Prefer RGB photographs over tiny greyscale thumbnails: MediaPipe",
+        "cannot find a hand in a 28x28 image at all.",
+    ),
+)
+
+DATASETS: dict[str, DatasetSpec] = {
+    ASL_ALPHABET.key: ASL_ALPHABET,
+    WLASL.key: WLASL,
+    ISL_ALPHABET.key: ISL_ALPHABET,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +227,52 @@ def find_class_root(search_root: Path, required: tuple[str, ...], max_depth: int
     return None
 
 
+def find_discovered_class_root(search_root: Path, max_depth: int = 5) -> Path | None:
+    """Find the folder holding class subfolders, without knowing their names.
+
+    Used for datasets where we deliberately do not hard-code a class list —
+    ISL alphabet sets disagree about whether digits are included, so the class
+    names are read from disk instead of asserted.
+
+    The heuristic: the best candidate is the directory with the most immediate
+    subfolders that actually contain images. Requiring images rules out an
+    intermediate folder that merely happens to have several children.
+    """
+    if not search_root.is_dir():
+        return None
+
+    best: Path | None = None
+    best_count = 0
+
+    frontier = [(search_root, 0)]
+    while frontier:
+        directory, depth = frontier.pop(0)
+
+        try:
+            children = [child for child in directory.iterdir() if child.is_dir()]
+        except (PermissionError, OSError):
+            continue
+
+        populated = sum(1 for child in children if count_files(child, IMAGE_SUFFIXES) > 0)
+        if populated > best_count:
+            best, best_count = directory, populated
+
+        if depth < max_depth:
+            frontier.extend((child, depth + 1) for child in children)
+
+    # Fewer than ten populated folders is not an alphabet by any arrangement.
+    return best if best_count >= 10 else None
+
+
+def discovered_classes(class_root: Path) -> list[str]:
+    """Class folder names that actually contain images, in sorted order."""
+    return sorted(
+        child.name
+        for child in class_root.iterdir()
+        if child.is_dir() and count_files(child, IMAGE_SUFFIXES) > 0
+    )
+
+
 def count_files(directory: Path, suffixes: set[str]) -> int:
     """Count files with the given extensions, one level deep."""
     if not directory.is_dir():
@@ -218,6 +317,33 @@ def find_metadata_json(search_root: Path) -> Path | None:
 def _print_manual_instructions(spec: DatasetSpec) -> None:
     """Explain exactly what to download and where to put it."""
     print(f"\n{BOLD}How to fix this{RESET}")
+
+    # Datasets with no canonical slug need choosing, not just downloading.
+    if not spec.kaggle_slug:
+        print(f"  1. Open {spec.url}")
+        print("  2. Pick a dataset that meets ALL of these:")
+        print(f"       - one folder per class (A/, B/, C/, ...)")
+        print(f"       - at least ~{spec.min_per_class} images per class")
+        print("       - RGB photographs, NOT 28x28 greyscale thumbnails")
+        print("         (MediaPipe cannot find a hand in a thumbnail at all)")
+        print("       - a licence permitting research/education use")
+        print(f"  3. Unzip it into: {DIM}{spec.expected_dir}{RESET}")
+        print(f"  4. Re-run:  python ml/scripts/download_datasets.py "
+              f"--dataset {spec.key} --verify")
+        print()
+        print(f"{BOLD}This script does not name a dataset for you on purpose.{RESET}")
+        print(f"{DIM}Several exist with different class sets and very different{RESET}")
+        print(f"{DIM}quality, and none has been verified here. Naming one would be{RESET}")
+        print(f"{DIM}guessing at a path. --verify will tell you if your choice works.{RESET}")
+        print()
+        print(f"{BOLD}Expected layout{RESET} (extra nesting is fine — this script finds it):")
+        print(f"  {spec.expected_dir.relative_to(REPO_ROOT)}/")
+        print("    ├── A/          any image filenames")
+        print("    ├── B/")
+        print("    ├── ...")
+        print("    └── Z/          digits 0-9 or 1-9 are fine too, if present")
+        return
+
     print(f"  1. Open {spec.url}")
     print("  2. Sign in to Kaggle and click Download (accept the terms if prompted).")
     print(f"  3. Unzip the archive into: {DIM}{spec.expected_dir}{RESET}")
@@ -251,7 +377,11 @@ def verify_images(spec: DatasetSpec, verbose: bool = True) -> bool:
         _print_manual_instructions(spec)
         return False
 
-    class_root = find_class_root(spec.expected_dir, spec.classes)
+    if spec.discover_classes:
+        class_root = find_discovered_class_root(spec.expected_dir)
+    else:
+        class_root = find_class_root(spec.expected_dir, spec.classes)
+
     if class_root is None:
         print(f"\n{RED}  FAIL — folder exists but no class subfolders (A, B, C, ...) found.{RESET}")
         try:
@@ -267,8 +397,17 @@ def verify_images(spec: DatasetSpec, verbose: bool = True) -> bool:
         print(f"  {DIM}found class folders nested at: ./{relative}{RESET}")
 
     # --- per-class counts ---------------------------------------------------
+    # For a discovered dataset the class list IS whatever is on disk, so there
+    # is no such thing as a missing class — only a thin one.
+    class_names = discovered_classes(class_root) if spec.discover_classes else list(spec.classes)
+
+    if spec.discover_classes:
+        print(f"  {DIM}discovered {len(class_names)} classes: "
+              f"{', '.join(class_names[:10])}"
+              f"{', ...' if len(class_names) > 10 else ''}{RESET}")
+
     counts: dict[str, int] = {}
-    for class_name in spec.classes:
+    for class_name in class_names:
         directory = class_root / class_name
         if not directory.is_dir():
             # Kaggle folder names are case-sensitive on Linux/macOS; try a
@@ -288,7 +427,7 @@ def verify_images(spec: DatasetSpec, verbose: bool = True) -> bool:
     if verbose:
         print(f"\n  {BOLD}images per class{RESET}")
         columns = 6
-        names = list(spec.classes)
+        names = list(class_names)
         for row_start in range(0, len(names), columns):
             cells = []
             for name in names[row_start : row_start + columns]:
@@ -297,15 +436,29 @@ def verify_images(spec: DatasetSpec, verbose: bool = True) -> bool:
                 cells.append(f"{colour}{name:>7}: {count:>5}{RESET}")
             print("   " + "  ".join(cells))
 
-    print(f"\n  total images: {BOLD}{total:,}{RESET} across {len(spec.classes)} classes")
+    print(f"\n  total images: {BOLD}{total:,}{RESET} across {len(class_names)} classes")
 
     # --- verdict ------------------------------------------------------------
-    if missing:
+    if missing and not spec.discover_classes:
         print(f"\n{RED}  FAIL — {len(missing)} class folder(s) empty or missing: {missing}{RESET}")
         print(f"  {DIM}All 29 classes are needed. 'nothing' especially: it is the neutral{RESET}")
         print(f"  {DIM}class that lets the model say \"that is not a letter\".{RESET}")
         _print_manual_instructions(spec)
         return False
+
+    if spec.discover_classes and len(class_names) < 20:
+        print(f"\n{RED}  FAIL — only {len(class_names)} classes found.{RESET}")
+        print(f"  {DIM}An alphabet needs at least the 26 letters. This looks like a{RESET}")
+        print(f"  {DIM}partial extraction, or a folder one level away from the classes.{RESET}")
+        _print_manual_instructions(spec)
+        return False
+
+    if spec.hands == 2:
+        print(f"\n  {BOLD}Note: this is a two-handed alphabet.{RESET}")
+        print(f"  {DIM}Features will be 126 wide, not 63, and Model A's ASL weights do{RESET}")
+        print(f"  {DIM}not transfer. Extract with:  --dataset {spec.key}{RESET}")
+        print(f"  {DIM}Expect a higher discard rate than ASL: two hands in frame occlude{RESET}")
+        print(f"  {DIM}each other, and MediaPipe loses landmarks it would otherwise find.{RESET}")
 
     if thin:
         print(f"\n{YELLOW}  PASS WITH WARNING — thin classes (<{spec.min_per_class}): {thin}{RESET}")
@@ -313,7 +466,7 @@ def verify_images(spec: DatasetSpec, verbose: bool = True) -> bool:
         print(f"  {DIM}balances classes down to the smallest, so accuracy will suffer.{RESET}")
         return True
 
-    print(f"\n{GREEN}  PASS — all {len(spec.classes)} classes present and populated.{RESET}")
+    print(f"\n{GREEN}  PASS — all {len(class_names)} classes present and populated.{RESET}")
     return True
 
 
@@ -463,9 +616,12 @@ def main() -> int:
     parser.add_argument("--layout", action="store_true", help="list what is in ml/data/raw")
     parser.add_argument(
         "--dataset",
-        choices=["static", "dynamic", "all"],
+        choices=["static", "dynamic", "isl", "all"],
         default="all",
-        help="static = ASL Alphabet (Model A), dynamic = WLASL (Model B, stretch)",
+        help=(
+            "static = ASL Alphabet (Model A) · dynamic = WLASL (Model B) · "
+            "isl = Indian Sign Language alphabet (two-handed)"
+        ),
     )
     args = parser.parse_args()
 
@@ -502,14 +658,32 @@ def main() -> int:
             print(f"  {label}  {spec.title}")
         print(f"{BOLD}{'=' * 62}{RESET}")
 
-        # Only Model A's dataset is required to proceed.
-        required_ok = results.get("static", True)
-        if required_ok:
-            print(f"\n{GREEN}Ready for Phase 3 extraction.{RESET}")
-            print(f"  {DIM}Next: python ml/scripts/extract_landmarks_images.py{RESET}")
+        # Which dataset is "required" depends on what was asked for. Verifying
+        # only ISL and being told "ready for extraction" because ASL happens to
+        # be on disk would be actively misleading — the previous version of
+        # this defaulted the missing key to True and did exactly that.
+        if args.dataset == "all":
+            required = [key for key in ("static",) if key in results]
+        else:
+            required = [args.dataset] if args.dataset in results else []
+
+        # Model B is a stretch goal and never blocks the build.
+        required = [key for key in required if key != "dynamic"]
+        failed = [key for key in required if not results.get(key)]
+
+        if not failed:
+            print(f"\n{GREEN}Ready for extraction.{RESET}")
+            for key in required or list(results):
+                if not results.get(key):
+                    continue
+                spec = DATASETS[key]
+                flag = f" --dataset {key}" if key != "static" else ""
+                print(f"  {DIM}Next: python ml/scripts/"
+                      f"extract_landmarks_images.py{flag}{RESET}")
             return 0
 
-        print(f"\n{RED}Not ready — the ASL Alphabet dataset is required for Model A.{RESET}")
+        names = ", ".join(DATASETS[key].title for key in failed)
+        print(f"\n{RED}Not ready — required dataset missing: {names}{RESET}")
         return 1
 
     return 0

@@ -17,7 +17,7 @@ from app import __version__
 from app.api import auth, meetings, transcripts
 from app.config import settings
 from app.database import engine, init_db
-from app.ml.predictor import dynamic_predictor, predictor
+from app.ml.predictor import dynamic_predictor, isl_predictor, predictor
 from app.ws import inference, signaling
 from app.ws.connection_manager import inference_manager, signaling_manager
 
@@ -68,6 +68,16 @@ async def lifespan(app: FastAPI):
         logger.info("Sign recognition ready")
     else:
         logger.warning("Sign recognition unavailable — %s", predictor.load_error)
+
+    # ISL is the alphabet BridgeTalk is being demonstrated with, but a
+    # deployment may legitimately ship only one of the two alphabets, so a
+    # missing model here is informational rather than a warning.
+    if isl_predictor.load():
+        logger.info(
+            "ISL recognition ready — %d classes", len(isl_predictor.class_names)
+        )
+    else:
+        logger.info("ISL recognition not available — %s", isl_predictor.load_error)
 
     # Model B is a stretch goal, so its absence is logged at INFO rather than
     # WARNING. A deployment with only Model A is the expected configuration,
@@ -146,6 +156,7 @@ def health() -> dict:
         # Model status here means the frontend can explain *why* sign detection
         # is unavailable instead of just failing to produce predictions.
         "model": predictor.describe(),
+        "isl_model": isl_predictor.describe(),
         "dynamic_model": dynamic_predictor.describe(),
         "websockets": {
             "inference": inference_manager.stats(),

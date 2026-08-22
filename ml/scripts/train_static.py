@@ -51,33 +51,43 @@ import numpy as np  # noqa: E402
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "backend"))
 
-from app.ml.normalization import NORMALIZATION_VERSION, SINGLE_HAND_FEATURES  # noqa: E402
+from app.ml.normalization import (  # noqa: E402
+    NORMALIZATION_VERSION,
+    SINGLE_HAND_FEATURES,
+    TWO_HAND_FEATURES,
+)
 
 PROCESSED_DIR = REPO_ROOT / "ml" / "data" / "processed"
 MODELS_DIR = REPO_ROOT / "ml" / "models"
 
 
-def load_split(name: str) -> tuple[np.ndarray, np.ndarray]:
-    features_path = PROCESSED_DIR / f"X_{name}.npy"
-    targets_path = PROCESSED_DIR / f"y_{name}.npy"
+def load_split(name: str, prefix: str = "") -> tuple[np.ndarray, np.ndarray]:
+    features_path = PROCESSED_DIR / f"X_{prefix}{name}.npy"
+    targets_path = PROCESSED_DIR / f"y_{prefix}{name}.npy"
 
     if not features_path.is_file() or not targets_path.is_file():
         raise FileNotFoundError(
             f"Missing {features_path.name} / {targets_path.name}. "
-            "Run: python ml/scripts/preprocess.py"
+            f"Run: python ml/scripts/preprocess.py"
+            f"{' --dataset isl' if prefix else ''}"
         )
 
     return np.load(features_path), np.load(targets_path)
 
 
-def build_model(num_classes: int, learning_rate: float):
-    """Assemble the MLP described in the module docstring."""
+def build_model(num_classes: int, learning_rate: float, num_features: int):
+    """Assemble the MLP described in the module docstring.
+
+    `num_features` is 63 for the one-handed ASL alphabet and 126 for the
+    two-handed ISL alphabet. The architecture is otherwise identical: both are
+    static handshapes, so a single-frame MLP is the right model for each.
+    """
     from tensorflow import keras
     from tensorflow.keras import layers
 
     model = keras.Sequential(
         [
-            keras.Input(shape=(SINGLE_HAND_FEATURES,), name="landmarks"),
+            keras.Input(shape=(num_features,), name="landmarks"),
             layers.Dense(256, activation="relu", name="dense_256"),
             layers.BatchNormalization(name="bn_1"),
             layers.Dropout(0.3, name="dropout_1"),
@@ -111,7 +121,24 @@ def main() -> int:
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--patience", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--dataset",
+        choices=["asl", "isl"],
+        default="asl",
+        help="asl = one-handed ASL alphabet · isl = two-handed ISL alphabet",
+    )
     args = parser.parse_args()
+
+    config = {
+        "asl": {"prefix": "", "labels": "labels.json", "model": "static_model.keras",
+                "metadata": "metadata.json", "history": "training_history.json",
+                "hands": 1, "source": "ASL Alphabet (grassknoted/asl-alphabet)",
+                "task": "ASL static fingerspelling classification"},
+        "isl": {"prefix": "isl_", "labels": "labels_isl.json", "model": "isl_model.keras",
+                "metadata": "isl_metadata.json", "history": "isl_training_history.json",
+                "hands": 2, "source": "Indian Sign Language alphabet",
+                "task": "ISL static fingerspelling classification (two-handed)"},
+    }[args.dataset]
 
     import tensorflow as tf
     from tensorflow import keras
@@ -124,10 +151,24 @@ def main() -> int:
     print(f"Devices: {[device.device_type for device in tf.config.list_physical_devices()]}")
 
     # --- data ---------------------------------------------------------------
-    X_train, y_train = load_split("train")
-    X_val, y_val = load_split("val")
+    X_train, y_train = load_split("train", config["prefix"])
+    X_val, y_val = load_split("val", config["prefix"])
 
-    labels_path = MODELS_DIR / "labels.json"
+    # Feature width comes from the data, not from a constant. Hard-coding 63
+    # here would train a silently wrong model on the two-handed ISL arrays
+    # instead of failing.
+    num_features = int(X_train.shape[1])
+    expected = SINGLE_HAND_FEATURES if config["hands"] == 1 else TWO_HAND_FEATURES
+    if num_features != expected:
+        print(
+            f"ERROR: {config['prefix'] or 'asl'} arrays have {num_features} features, "
+            f"expected {expected} for a {config['hands']}-handed alphabet. "
+            "Re-run preprocess.py for the right --dataset.",
+            file=sys.stderr,
+        )
+        return 1
+
+    labels_path = MODELS_DIR / config["labels"]
     if not labels_path.is_file():
         print(f"ERROR: {labels_path} missing. Run preprocess.py first.", file=sys.stderr)
         return 1
@@ -150,7 +191,7 @@ def main() -> int:
         return 1
 
     # --- model --------------------------------------------------------------
-    model = build_model(num_classes, args.learning_rate)
+    model = build_model(num_classes, args.learning_rate, num_features)
     model.summary()
 
     callbacks = [
@@ -212,23 +253,24 @@ def main() -> int:
 
     # --- save ---------------------------------------------------------------
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    model_path = MODELS_DIR / "static_model.keras"
+    model_path = MODELS_DIR / config["model"]
     model.save(model_path)
     print(f"\nSaved {model_path.relative_to(REPO_ROOT)}")
 
     metadata = {
-        "model": "static_model.keras",
+        "model": config["model"],
         "model_type": "MLP",
-        "task": "ASL static fingerspelling classification",
+        "task": config["task"],
+        "num_hands": config["hands"],
         "trained_at": datetime.now(timezone.utc).isoformat(),
         # The backend refuses to load a model whose normalisation version does
         # not match the running code. That turns a stale model file into a loud
         # startup error instead of a silent accuracy collapse.
         "normalization_version": NORMALIZATION_VERSION,
-        "input_shape": [SINGLE_HAND_FEATURES],
+        "input_shape": [num_features],
         "output_shape": [num_classes],
         "class_names": class_names,
-        "source_dataset": "ASL Alphabet (grassknoted/asl-alphabet)",
+        "source_dataset": config["source"],
         "self_recorded_data": False,
         "architecture": "Dense256-BN-Drop0.3 / Dense128-BN-Drop0.3 / Dense64 / Softmax",
         "hyperparameters": {
@@ -251,12 +293,12 @@ def main() -> int:
         "samples": {"train": int(len(X_train)), "val": int(len(X_val))},
     }
 
-    metadata_path = MODELS_DIR / "metadata.json"
+    metadata_path = MODELS_DIR / config["metadata"]
     metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     print(f"Saved {metadata_path.relative_to(REPO_ROOT)}")
 
     # Training history, for the accuracy/loss curves in the report.
-    history_path = MODELS_DIR / "training_history.json"
+    history_path = MODELS_DIR / config["history"]
     history_path.write_text(
         json.dumps({key: [float(v) for v in values] for key, values in history.history.items()},
                    indent=2),

@@ -45,6 +45,7 @@ export default function SignDetectionPanel({
   serverError,
   modelInfo,
   dynamicModelInfo,
+  islModelInfo,
   handDetected,
   mode = 'static',
   onModeChange,
@@ -65,6 +66,9 @@ export default function SignDetectionPanel({
 
   const showingLetter = handDetected && label !== 'nothing' && label !== '—';
   const unitNoun = mode === 'dynamic' ? 'word' : 'letter';
+  // ISL letters need both hands; saying so is the single most useful
+  // correction to give a signer whose letters are not registering.
+  const needsBothHands = mode === 'isl' && prediction?.hands_seen === 1;
 
   return (
     <section className="panel flex flex-col gap-5" aria-labelledby="sign-detection-heading">
@@ -94,6 +98,7 @@ export default function SignDetectionPanel({
           mode={mode}
           onChange={onModeChange}
           staticModelInfo={modelInfo}
+          islModelInfo={islModelInfo}
           dynamicModelInfo={dynamicModelInfo}
         />
       )}
@@ -144,6 +149,12 @@ export default function SignDetectionPanel({
                 <span className="tabular-nums text-slate-400">{latency} ms</span>
               )}
             </p>
+
+            {needsBothHands && (
+              <p className="mt-1 text-xs text-signal-warn" role="status" aria-live="polite">
+                Only one hand visible — most ISL letters need both.
+              </p>
+            )}
           </div>
         </div>
       </div>
