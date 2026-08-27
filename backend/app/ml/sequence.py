@@ -84,7 +84,7 @@ class SequenceBuffer:
         self.reset_after_empty = (
             reset_after_empty
             if reset_after_empty is not None
-            else settings.dynamic_reset_frames
+            else settings.dynamic_buffer_reset_frames
         )
 
         if self.length < 2:

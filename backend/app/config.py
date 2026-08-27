@@ -96,8 +96,20 @@ class Settings(BaseSettings):
     # Fraction of a window that must contain a detected hand before it is
     # classified. Matches the threshold extraction used on training clips.
     dynamic_min_detection_rate: float = 0.30
-    # Consecutive hand-free frames that count as a sign boundary.
+    # Consecutive hand-free frames that clear the SMOOTHER's debounce, so a
+    # word can be repeated immediately after a pause.
     dynamic_reset_frames: int = 8
+    # Consecutive hand-free frames that clear the sequence BUFFER. Deliberately
+    # as long as the window itself, which makes it almost a no-op: the deque
+    # already ages old frames out after `sequence_length` pushes, so an explicit
+    # reset only ever discards frames that were about to leave anyway.
+    #
+    # It used to be 8, and that was measurably harmful. Clearing the buffer
+    # forces a full 30-frame refill — exactly the length of one sign — so the
+    # sign immediately after any pause was missed entirely. On a continuous
+    # stream built from held-out clips, raising this cut word error rate from
+    # 23.3% to 17.5%, and from 64.2% to 34.2% when signing with pauses.
+    dynamic_buffer_reset_frames: int = 30
 
     # ------------------------------------------------------------------ #
     # Derived values

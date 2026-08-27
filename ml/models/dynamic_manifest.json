@@ -1,5 +1,5 @@
 {
-  "created_at": "2026-08-27T13:58:32.178931+00:00",
+  "created_at": "2026-08-27T14:04:59.419664+00:00",
   "source_dataset": "INCLUDE (Indian Sign Language, word level)",
   "language": "ISL",
   "citation": "Sridhar, A., Ganesan, R.G., Kumar, P., Khapra, M. INCLUDE: A Large Scale Dataset for Indian Sign Language Recognition. ACM MM 2020.",
@@ -47,14 +47,16 @@
     "wet",
     "you",
     "you (plural)",
-    "young"
+    "young",
+    "__transition__"
   ],
+  "transition_class": "__transition__",
   "split_strategy": "random",
   "split_strategy_requested": "signer",
   "signer_disjoint": false,
   "signers_recorded_by_dataset": false,
   "splits": {
-    "train": 2236,
+    "train": 8932,
     "val": 119,
     "test": 149
   },

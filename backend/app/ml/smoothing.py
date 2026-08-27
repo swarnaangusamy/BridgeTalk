@@ -54,6 +54,12 @@ SPACE_LABEL = "space"
 DELETE_LABEL = "del"
 NEUTRAL_LABEL = "nothing"
 
+# Model B can be trained with a class meaning "this window sits between two
+# signs". It is a real prediction and a useful one, but it is never a word, so
+# it is treated exactly like the no-hand neutral state: it resets, it never
+# appends, and the user never sees the string.
+TRANSITION_LABEL = "__transition__"
+
 MAX_SENTENCE_LENGTH = 500
 
 
@@ -156,8 +162,11 @@ class PredictionSmoother:
         if now_ms is None:
             now_ms = time.monotonic() * 1000.0
 
-        # --- no hand: filter 4, the neutral reset ---------------------------
-        if label is None or label == NEUTRAL_LABEL:
+        # --- no hand, or an explicit boundary: filter 4, the neutral reset ---
+        # A boundary prediction is the model telling us the window straddles two
+        # signs. Treating it as neutral is what stops that window being forced
+        # into whichever real word happened to score second.
+        if label is None or label in (NEUTRAL_LABEL, TRANSITION_LABEL):
             self._neutral_streak += 1
             self._recent.append(None)
 

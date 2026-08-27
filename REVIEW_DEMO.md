@@ -43,9 +43,9 @@ Run through this **the evening before**, not ten minutes before.
 **Rehearse with your signer**
 
 - [ ] Agree on **5-6 words** from the trained vocabulary and practise them
-- [ ] Practise the pause: **sign one word, drop the hands, then the next.**
-      The model is trained on clips containing a single sign, so a continuous
-      stream with no gaps is the one thing it genuinely cannot parse
+- [ ] **Sign naturally and continuously — do NOT pause or drop the hands
+      between words.** Measured on continuous streams: signing straight through
+      gives 17.5% word error rate, pausing gives 34.2%. Pausing is twice as bad
 - [ ] Check both hands stay in frame — the word model tracks two
 
 ---
@@ -89,13 +89,13 @@ Incognito window: log in as `hearing.demo@example.com`, join by code.
 
 ### 3:00 — Both directions (90 seconds)
 
-Have your signer sign **three agreed words**, pausing and dropping the hands
-between each.
+Have your signer sign **three agreed words continuously**, without pausing.
 
-> "Each word is recognised from a three-second window of hand movement, not a
-> single frame — a word sign IS the movement. Watch the buffer fill, then the
-> word appear. It is only accepted once it wins the majority vote across
-> several windows; without that the caption would flicker every frame."
+> "Each word is recognised from a rolling three-second window of movement, not
+> a single frame — a word sign IS the movement. Nothing tells the system where
+> one sign ends, so the model has a class for 'this window is between two
+> signs', and those windows produce no output instead of being forced into
+> whichever word scored second.""
 
 Point at the other window as the text appears.
 
@@ -274,7 +274,9 @@ is not.
 
 | | |
 |---|---|
-| Test accuracy (top-1 / top-3) | **89.9% / 96.0%** |
+| Accuracy on pre-cut clips (top-1 / top-3) | 85.2% / 94.6% |
+| **Word error rate, continuous signing** | **17.5%** |
+| Word error rate if the signer pauses | 34.2% — *worse*, see below |
 | Validation accuracy | 85.7% |
 | Vocabulary | **40 ISL words** |
 | Test set size | 149 clips |
@@ -306,6 +308,7 @@ is not.
 | Added hand position to word features | 79.8% | **84.8%** |
 | Doubled the vocabulary (more data) | 84.8% @ 20 words | **89.9% @ 40 words** |
 | Pushed to 70 words | 89.9% @ 40 | 79.0% — *worse*, so we kept 40 |
+| Taught the model what a sign boundary looks like | 27.5% WER | **17.5% WER** on continuous signing |
 | Compiled the inference graph | 1373 ms | **18 ms** |
 
 The last one is the best story: predictions were already *correct* at a full

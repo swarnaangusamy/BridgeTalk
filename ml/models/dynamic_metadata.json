@@ -2,14 +2,14 @@
   "model": "dynamic_model.keras",
   "model_type": "LSTM",
   "task": "WLASL word-level sign classification",
-  "trained_at": "2026-08-27T13:22:36.849721+00:00",
+  "trained_at": "2026-08-27T14:13:11.119337+00:00",
   "normalization_version": 1,
   "input_shape": [
     30,
     132
   ],
   "output_shape": [
-    40
+    41
   ],
   "class_names": [
     "bad",
@@ -51,7 +51,8 @@
     "wet",
     "you",
     "you (plural)",
-    "young"
+    "young",
+    "__transition__"
   ],
   "source_dataset": "INCLUDE (Indian Sign Language, word level)",
   "language": "ISL",
@@ -67,21 +68,21 @@
     "loss": "sparse_categorical_crossentropy",
     "batch_size": 32,
     "max_epochs": 150,
-    "epochs_run": 44,
+    "epochs_run": 34,
     "early_stopping_patience": 20,
     "class_weights": true,
     "seed": 42
   },
   "metrics": {
-    "train_accuracy": 0.9942,
+    "train_accuracy": 0.899,
     "val_accuracy": 0.8571,
-    "val_loss": 0.6382,
-    "train_val_gap": 0.137
+    "val_loss": 0.7313,
+    "train_val_gap": 0.0419
   },
-  "masked_timestep_fraction": 0.1258,
-  "training_time_seconds": 235.2,
+  "masked_timestep_fraction": 0.1262,
+  "training_time_seconds": 451.9,
   "samples": {
-    "train": 2236,
+    "train": 8932,
     "val": 119
   }
 }

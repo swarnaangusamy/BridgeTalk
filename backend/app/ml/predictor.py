@@ -278,14 +278,21 @@ class SignPredictor:
 
         return self.class_names[index], float(probabilities[index]), probabilities
 
+    @property
+    def user_facing_classes(self) -> list[str]:
+        """Class names minus internal ones, for display and counting."""
+        return [name for name in self.class_names if not name.startswith("__")]
+
     def describe(self) -> dict[str, Any]:
         """Model status for /health and the frontend's status panel."""
         return {
             "mode": self.mode,
             "loaded": self.is_loaded,
             "error": self.load_error,
-            "classes": len(self.class_names),
-            "class_names": self.class_names,
+            # The transition class is machinery, not vocabulary — it must not
+            # appear in a count shown to a user as "40 words".
+            "classes": len(self.user_facing_classes),
+            "class_names": self.user_facing_classes,
             "normalization_version": NORMALIZATION_VERSION,
             "val_accuracy": self.metadata.get("metrics", {}).get("val_accuracy"),
             "trained_at": self.metadata.get("trained_at"),

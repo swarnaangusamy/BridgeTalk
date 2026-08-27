@@ -39,7 +39,9 @@
     "wet",
     "you",
     "you (plural)",
-    "young"
+    "young",
+    "__transition__"
   ],
-  "count": 40
+  "count": 41,
+  "transition_class": "__transition__"
 }

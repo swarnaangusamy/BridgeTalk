@@ -257,6 +257,90 @@ def mirror_sequence(sequence: np.ndarray) -> np.ndarray:
     return out
 
 
+TRANSITION_LABEL = "__transition__"
+
+
+def build_misaligned_windows(
+    sequences: np.ndarray,
+    targets: np.ndarray,
+    rng: np.random.Generator,
+    per_clip: int = 3,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """Teach the model what a MISALIGNED window looks like, and what a boundary is.
+
+    THE PROBLEM THIS SOLVES
+    -----------------------
+    Every training clip is cut to contain exactly one sign, so the model only
+    ever sees perfectly aligned windows. Live, a signer does not stop between
+    words, and a 30-frame window almost never lines up with a sign — it holds
+    the tail of one and the head of the next.
+
+    Measured on a continuous stream built from held-out clips, that showed up
+    as deletions: 23 of 120 signs produced no output at all, because no window
+    ever looked enough like its training data to clear the confidence gate.
+
+    WHAT THIS BUILDS
+    ----------------
+    Windows spanning two different clips, cut at a random offset:
+
+        offset  6  ->  24 frames of A, 6 of B    -> still mostly A, label A
+        offset 15  ->  15 frames of A, 15 of B   -> neither, label __transition__
+        offset 24  ->   6 frames of A, 24 of B   -> mostly B, label B
+
+    The first and third teach tolerance to misalignment. The middle one gives
+    the model a way to say **"this is not a word"** — which it previously did
+    not have, and without which it must answer every boundary window with one
+    of the real classes and hope the smoother filters it out.
+
+    Both hands of this are built from the public dataset. Nothing is recorded.
+    """
+    if len(sequences) < 2:
+        return np.empty((0, *sequences.shape[1:]), np.float32), np.empty(0, np.int64), 0
+
+    length = sequences.shape[1]
+    windows: list[np.ndarray] = []
+    labels: list[int] = []
+    transitions = 0
+
+    # Mostly-A and mostly-B keep their own label; the middle band is a boundary.
+    mostly = max(2, int(length * 0.25))       # <= 25% of the other clip
+    balanced_low = int(length * 0.40)
+    balanced_high = int(length * 0.60)
+
+    for index in range(len(sequences)):
+        for _ in range(per_clip):
+            other = int(rng.integers(len(sequences)))
+            if other == index:
+                continue
+
+            offset = int(rng.integers(mostly, length - mostly + 1))
+            window = np.concatenate(
+                [sequences[index][offset:], sequences[other][:offset]]
+            )
+
+            if offset <= mostly:
+                labels.append(int(targets[index]))
+            elif offset >= length - mostly:
+                labels.append(int(targets[other]))
+            elif balanced_low <= offset <= balanced_high:
+                if targets[index] == targets[other]:
+                    # Two clips of the SAME word joined is still that word, not
+                    # a boundary. Mislabelling it would teach the opposite.
+                    labels.append(int(targets[index]))
+                else:
+                    labels.append(-1)       # resolved to the transition id later
+                    transitions += 1
+            else:
+                labels.append(int(targets[index] if offset < length // 2 else targets[other]))
+
+            windows.append(window)
+
+    if not windows:
+        return np.empty((0, *sequences.shape[1:]), np.float32), np.empty(0, np.int64), 0
+
+    return np.stack(windows).astype(np.float32), np.array(labels, dtype=np.int64), transitions
+
+
 def augment_training_set(
     sequences: np.ndarray, targets: np.ndarray, seed: int
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -302,6 +386,9 @@ def main() -> int:
         "--split-strategy", choices=["signer", "official", "random"], default="signer"
     )
     parser.add_argument("--no-augment", action="store_true")
+    parser.add_argument("--no-misaligned", action="store_true",
+                        help="Skip boundary/misaligned windows (for comparison)")
+    parser.add_argument("--misaligned-per-clip", type=int, default=3)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -403,6 +490,35 @@ def main() -> int:
     X_test = sequences[indices["test"]]
     y_test = targets[indices["test"]]
 
+    # --- misaligned windows + the transition class ---------------------------
+    # Added BEFORE the geometric augmentation, so rotation, noise and mirroring
+    # apply to boundary windows too. A boundary the model has only seen from
+    # one camera angle is barely a boundary.
+    transition_index: int | None = None
+
+    if not args.no_misaligned:
+        rng_windows = np.random.default_rng(args.seed + 1)
+        extra_X, extra_y, transition_count = build_misaligned_windows(
+            X_train, y_train, rng_windows, per_clip=args.misaligned_per_clip
+        )
+
+        if len(extra_X):
+            if transition_count:
+                # The transition class is appended last, so every existing
+                # label index keeps its meaning and labels_dynamic.json stays
+                # aligned with models trained before this existed.
+                transition_index = len(class_names)
+                class_names = class_names + [TRANSITION_LABEL]
+                extra_y = np.where(extra_y == -1, transition_index, extra_y)
+
+            X_train = np.concatenate([X_train, extra_X])
+            y_train = np.concatenate([y_train, extra_y])
+
+            print(f"\nMisaligned windows: +{len(extra_X):,} "
+                  f"({transition_count:,} of them boundaries)")
+            print("  teaches tolerance to windows that straddle two signs, and")
+            print("  gives the model a way to say 'this is not a word'")
+
     # --- augment ------------------------------------------------------------
     if not args.no_augment:
         before = len(X_train)
@@ -426,7 +542,17 @@ def main() -> int:
     labels_path = MODELS_DIR / "labels_dynamic.json"
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     labels_path.write_text(
-        json.dumps({"classes": class_names, "count": len(class_names)}, indent=2),
+        json.dumps(
+            {
+                "classes": class_names,
+                "count": len(class_names),
+                # The backend never shows this to a user; it emits nothing when
+                # the transition class wins. Recorded so the label list is
+                # self-describing rather than having a mystery entry.
+                "transition_class": TRANSITION_LABEL if transition_index is not None else None,
+            },
+            indent=2,
+        ),
         encoding="utf-8",
     )
     print(f"Wrote {labels_path.relative_to(REPO_ROOT)}")
@@ -441,6 +567,7 @@ def main() -> int:
         "sequence_length": int(sequences.shape[1]),
         "features_per_frame": TWO_HAND_FEATURES,
         "classes": class_names,
+        "transition_class": TRANSITION_LABEL if transition_index is not None else None,
         "split_strategy": strategy,
         "split_strategy_requested": args.split_strategy,
         # The single most important honesty flag in this file. The backend

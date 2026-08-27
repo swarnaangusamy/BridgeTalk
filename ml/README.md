@@ -335,6 +335,58 @@ the MLPs, but only compilation is fast for both.
 Nothing in the output would have revealed this. The predictions were correct —
 just a second too late to caption anything.
 
+### Continuous signing: measuring the thing users actually do
+
+`evaluate.py` reports 85.2% on the test split, and that number grades the model
+on clips somebody already cut to hold exactly one sign. A person signing a
+sentence does not stop between words. So `evaluate_continuous.py` builds the
+harder input from the same held-out clips — concatenated end to end with **no
+gap** — pushes them through the real buffer, predictor and smoother, and reports
+Word Error Rate against the words that went in.
+
+Decomposed, because the error types need opposite fixes: *deletions* mean signs
+are being missed, *insertions* mean words are being invented between real ones.
+
+| | WER | subs | dels | ins |
+|---|---|---|---|---|
+| Original pipeline | 27.5% | 8 | 23 | 2 |
+| + boundary-aware training | 23.3% | 11 | 14 | 3 |
+| + buffer-reset fix | **17.5%** | 11 | 7 | 3 |
+
+**Two findings came out of building this harness.**
+
+**The advice to pause between words was wrong.** With a one-second pause, WER
+was *63.3%* — more than twice as bad as signing continuously. The cause was a
+buffer that cleared itself after 8 hand-free frames and then needed a full 30
+frames to refill, which is exactly the length of one sign. Every sign
+immediately after a pause was missed. The demo instruction has been corrected,
+and the buffer reset is now as long as the window itself, which makes it nearly
+a no-op since the deque already ages frames out.
+
+**The model had no way to say "this is not a word".** Trained only on
+pre-segmented clips, it had never seen a window straddling two signs — yet at
+inference most windows are exactly that, and it was forced to answer each one
+with a real word. `build_misaligned_windows` synthesises those windows from the
+public data by joining two clips at a random offset:
+
+    offset  6  ->  24 frames of A, 6 of B   -> still mostly A, label A
+    offset 15  ->  15 frames of A, 15 of B  -> neither, label __transition__
+    offset 24  ->   6 frames of A, 24 of B  -> mostly B, label B
+
+The outer two teach tolerance to misalignment; the middle one is a genuine
+boundary class. `__transition__` is treated exactly like the no-hand neutral
+state — it never appends and the user never sees it — and the predictor hides
+it from the class list so the UI does not advertise 41 words.
+
+This costs isolated-clip accuracy (89.9% -> 85.2%) and buys continuous accuracy,
+which is the one a conversation depends on. That trade is deliberate.
+
+**The honest remaining limit.** 17.5% WER means roughly one word in six is
+wrong, and continuous sign segmentation is an open research problem rather than
+something a mini project closes. Two of the three error types are now small; the
+substitutions that remain are the same semantic near-pairs the confusion matrix
+shows on isolated clips.
+
 ### INCLUDE cannot support a signer-disjoint split, and says so
 
 Model B's strongest claim on WLASL is that its test set holds out entire
