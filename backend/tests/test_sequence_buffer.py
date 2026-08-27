@@ -11,13 +11,18 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from app.ml.normalization import TWO_HAND_FEATURES
+from app.ml.normalization import SEQUENCE_FEATURES
 from app.ml.sequence import SequenceBuffer
 
 
 def a_hand(value: float = 0.5) -> np.ndarray:
-    """A frame containing a detectable (non-zero) hand."""
-    return np.full(TWO_HAND_FEATURES, value, dtype=np.float32)
+    """A frame containing a detectable (non-zero) hand.
+
+    132 wide: 126 shape features plus the six wrist-position channels that
+    carry movement. The buffer centres those positions over the window, so
+    assertions below look at the SHAPE channels, which pass through untouched.
+    """
+    return np.full(SEQUENCE_FEATURES, value, dtype=np.float32)
 
 
 def buffer(**overrides) -> SequenceBuffer:
@@ -49,7 +54,7 @@ def test_no_window_until_the_buffer_is_full():
 
     window = sequence.push(a_hand())
     assert window is not None
-    assert window.shape == (10, TWO_HAND_FEATURES)
+    assert window.shape == (10, SEQUENCE_FEATURES)
 
 
 def test_window_slides_and_keeps_the_most_recent_frames():
@@ -191,8 +196,12 @@ def test_wrong_feature_width_is_rejected():
     """126 features, not 63. Sending Model A's vector here must not silently pad."""
     sequence = buffer()
 
-    with pytest.raises(ValueError, match="126"):
+    with pytest.raises(ValueError, match="132"):
         sequence.push(np.zeros(63, dtype=np.float32))
+
+    # 126 is the ISL-alphabet width — a plausible mistake, and still wrong here.
+    with pytest.raises(ValueError, match="132"):
+        sequence.push(np.zeros(126, dtype=np.float32))
 
 
 def test_reset_clears_everything():

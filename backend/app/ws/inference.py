@@ -33,7 +33,11 @@ from sqlalchemy import select
 
 from app.core.security import decode_access_token
 from app.database import SessionLocal
-from app.ml.normalization import normalize_hands, normalize_primary_hand
+from app.ml.normalization import (
+    normalize_hands,
+    normalize_primary_hand,
+    sequence_frame_features,
+)
 from app.ml.predictor import (
     ModelNotLoadedError,
     dynamic_predictor,
@@ -252,7 +256,10 @@ def _handle_dynamic_frame(
 
     if hands:
         try:
-            features = normalize_hands(hands)
+            # Shape plus wrist position — see sequence_frame_features. The ISL
+            # alphabet path above uses normalize_hands instead, because for a
+            # letter the position genuinely should not matter.
+            features = sequence_frame_features(hands)
         except (ValueError, TypeError) as exc:
             return _error("INVALID_MESSAGE", f"Bad landmark data: {exc}")
     else:

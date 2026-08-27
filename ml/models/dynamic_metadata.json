@@ -1,0 +1,67 @@
+{
+  "model": "dynamic_model.keras",
+  "model_type": "LSTM",
+  "task": "WLASL word-level sign classification",
+  "trained_at": "2026-08-27T13:02:59.963659+00:00",
+  "normalization_version": 1,
+  "input_shape": [
+    30,
+    132
+  ],
+  "output_shape": [
+    20
+  ],
+  "class_names": [
+    "bad",
+    "big large",
+    "cool",
+    "dry",
+    "extra",
+    "fast",
+    "good",
+    "happy",
+    "he",
+    "healthy",
+    "hot",
+    "i",
+    "it",
+    "loud",
+    "narrow",
+    "new",
+    "old",
+    "quiet",
+    "she",
+    "sick"
+  ],
+  "source_dataset": "INCLUDE (Indian Sign Language, word level)",
+  "language": "ISL",
+  "citation": "Sridhar, A., Ganesan, R.G., Kumar, P., Khapra, M. INCLUDE: A Large Scale Dataset for Indian Sign Language Recognition. ACM MM 2020.",
+  "self_recorded_data": false,
+  "split_strategy": "random",
+  "signer_disjoint": false,
+  "architecture": "Masking / BiLSTM128-seq / Drop0.3 / BiLSTM64 / Drop0.3 / Dense64 / Softmax",
+  "bidirectional": true,
+  "hyperparameters": {
+    "optimizer": "adam",
+    "learning_rate": 0.001,
+    "loss": "sparse_categorical_crossentropy",
+    "batch_size": 32,
+    "max_epochs": 150,
+    "epochs_run": 32,
+    "early_stopping_patience": 20,
+    "class_weights": true,
+    "seed": 42
+  },
+  "metrics": {
+    "train_accuracy": 0.9616,
+    "val_accuracy": 0.8,
+    "val_loss": 0.8499,
+    "train_val_gap": 0.1616
+  },
+  "masked_timestep_fraction": 0.1171,
+  "training_time_seconds": 205.7,
+  "samples": {
+    "train": 1120,
+    "val": 60
+  }
+}

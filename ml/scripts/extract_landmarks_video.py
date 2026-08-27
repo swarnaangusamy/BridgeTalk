@@ -77,8 +77,9 @@ from tqdm import tqdm  # noqa: E402
 # inference time, and the parity test guards the two against drifting apart.
 from app.ml.normalization import (  # noqa: E402
     NORMALIZATION_VERSION,
-    TWO_HAND_FEATURES,
-    normalize_hands,
+    SEQUENCE_FEATURES,
+    center_sequence_positions,
+    sequence_frame_features,
 )
 
 RAW_ROOT = REPO_ROOT / "ml" / "data" / "raw"
@@ -365,7 +366,7 @@ def resample_sequence(frames: list[np.ndarray], length: int = SEQUENCE_LENGTH) -
     timestep something the camera actually saw.
     """
     if not frames:
-        return np.zeros((length, TWO_HAND_FEATURES), dtype=np.float32)
+        return np.zeros((length, SEQUENCE_FEATURES), dtype=np.float32)
 
     if len(frames) == 1:
         return np.repeat(frames[0][None, :], length, axis=0).astype(np.float32)
@@ -439,12 +440,15 @@ def extract_one(job: dict) -> dict:
                     }
                     for hand_index in range(len(detection.hand_landmarks))
                 ]
-                frames.append(normalize_hands(hands))
+                # Shape AND position. A word sign is a trajectory, and
+                # normalize_hands alone pins every wrist to the origin, which
+                # makes a sweeping hand indistinguishable from a still one.
+                frames.append(sequence_frame_features(hands))
                 frames_with_hands += 1
             else:
                 # Kept, not dropped: an all-zero frame is a masked timestep and
                 # preserves the gesture's real timing.
-                frames.append(np.zeros(TWO_HAND_FEATURES, dtype=np.float32))
+                frames.append(np.zeros(SEQUENCE_FEATURES, dtype=np.float32))
 
             index += 1
 
@@ -460,7 +464,12 @@ def extract_one(job: dict) -> dict:
             result["status"] = "too_few_hands"
             return result
 
-        result["sequence"] = resample_sequence(frames).tolist()
+        # Centre the position channels over the clip, so what the model sees
+        # is movement relative to the sign's own centre rather than where the
+        # signer happened to stand.
+        result["sequence"] = center_sequence_positions(
+            resample_sequence(frames)
+        ).tolist()
         return result
 
     except Exception as exc:  # noqa: BLE001 - one bad clip must not stop the run
@@ -794,7 +803,7 @@ def main() -> int:
         "self_recorded_data": False,
         "normalization_version": NORMALIZATION_VERSION,
         "sequence_length": SEQUENCE_LENGTH,
-        "features_per_frame": TWO_HAND_FEATURES,
+        "features_per_frame": SEQUENCE_FEATURES,
         "min_detection_rate": MIN_DETECTION_RATE,
         "glosses": glosses,
         "clips_processed": len(results),

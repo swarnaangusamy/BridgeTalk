@@ -60,9 +60,16 @@ import numpy as np  # noqa: E402
 from app.ml.normalization import (  # noqa: E402
     NUM_LANDMARKS,
     NORMALIZATION_VERSION,
+    SEQUENCE_FEATURES,
     SINGLE_HAND_FEATURES,
     TWO_HAND_FEATURES,
 )
+
+# A frame is [left_shape(63) | right_shape(63) | left_pos(3) | right_pos(3)].
+# Every augmentation below has to treat the position tail as coordinates too:
+# rotating the hands but not the path they travel would teach the model a
+# motion no signer produces.
+POSITION_START = TWO_HAND_FEATURES
 
 PROCESSED_DIR = REPO_ROOT / "ml" / "data" / "processed"
 MODELS_DIR = REPO_ROOT / "ml" / "models"
@@ -185,6 +192,16 @@ def rotate_sequence(sequence: np.ndarray, degrees: float) -> np.ndarray:
 
         out[live, start : start + SINGLE_HAND_FEATURES] = block.reshape(-1, SINGLE_HAND_FEATURES)
 
+    # Rotate the wrist positions by the same angle. Omitting this would rotate
+    # each hand's shape while leaving its trajectory pointing the old way.
+    for slot in range(2):
+        start = POSITION_START + slot * 3
+        pos = out[live, start : start + 3]
+        x, y = pos[:, 0].copy(), pos[:, 1].copy()
+        pos[:, 0] = x * cos - y * sin
+        pos[:, 1] = x * sin + y * cos
+        out[live, start : start + 3] = pos
+
     return out
 
 
@@ -223,8 +240,15 @@ def mirror_sequence(sequence: np.ndarray) -> np.ndarray:
         out[:, start : start + SINGLE_HAND_FEATURES] = block.reshape(len(out), SINGLE_HAND_FEATURES)
 
     left = out[:, :SINGLE_HAND_FEATURES].copy()
-    out[:, :SINGLE_HAND_FEATURES] = out[:, SINGLE_HAND_FEATURES:]
-    out[:, SINGLE_HAND_FEATURES:] = left
+    out[:, :SINGLE_HAND_FEATURES] = out[:, SINGLE_HAND_FEATURES:POSITION_START]
+    out[:, SINGLE_HAND_FEATURES:POSITION_START] = left
+
+    # The same two operations on the position tail: mirror the x axis, then
+    # swap which hand each path belongs to.
+    out[:, POSITION_START::3] *= -1.0
+    left_pos = out[:, POSITION_START : POSITION_START + 3].copy()
+    out[:, POSITION_START : POSITION_START + 3] = out[:, POSITION_START + 3 :]
+    out[:, POSITION_START + 3 :] = left_pos
 
     # Negating x turned exact zeros into -0.0, which is not `!= 0.0` safe to
     # reason about later. Restore true zeros on frames that had no hands.
@@ -286,6 +310,17 @@ def main() -> int:
         print(f"ERROR: {source} not found.", file=sys.stderr)
         print("Run: python ml/scripts/extract_landmarks_video.py", file=sys.stderr)
         return 1
+
+    # Provenance comes from the extraction report, never from a constant here.
+    # Hard-coding it meant a manifest that confidently said "WLASL" while
+    # describing Indian Sign Language data — the kind of wrong that survives
+    # into a report because nothing checks it.
+    report_path = PROCESSED_DIR / "video_extraction_report.json"
+    report = (
+        json.loads(report_path.read_text(encoding="utf-8"))
+        if report_path.is_file()
+        else {}
+    )
 
     data = np.load(source, allow_pickle=False)
     sequences = data["sequences"].astype(np.float32)
@@ -398,7 +433,9 @@ def main() -> int:
 
     manifest = {
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "source_dataset": "WLASL processed (risangbaskoro/wlasl-processed)",
+        "source_dataset": report.get("source_dataset", "unknown — extraction report missing"),
+        "language": report.get("language", "unknown"),
+        "citation": report.get("citation"),
         "self_recorded_data": False,
         "normalization_version": NORMALIZATION_VERSION,
         "sequence_length": int(sequences.shape[1]),

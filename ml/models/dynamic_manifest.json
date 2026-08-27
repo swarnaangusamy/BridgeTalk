@@ -1,0 +1,84 @@
+{
+  "created_at": "2026-08-27T12:49:50.469198+00:00",
+  "source_dataset": "INCLUDE (Indian Sign Language, word level)",
+  "language": "ISL",
+  "citation": "Sridhar, A., Ganesan, R.G., Kumar, P., Khapra, M. INCLUDE: A Large Scale Dataset for Indian Sign Language Recognition. ACM MM 2020.",
+  "self_recorded_data": false,
+  "normalization_version": 1,
+  "sequence_length": 30,
+  "features_per_frame": 126,
+  "classes": [
+    "bad",
+    "big large",
+    "cool",
+    "dry",
+    "extra",
+    "fast",
+    "good",
+    "happy",
+    "he",
+    "healthy",
+    "hot",
+    "i",
+    "it",
+    "loud",
+    "narrow",
+    "new",
+    "old",
+    "quiet",
+    "she",
+    "sick"
+  ],
+  "split_strategy": "random",
+  "split_strategy_requested": "signer",
+  "signer_disjoint": false,
+  "signers_recorded_by_dataset": false,
+  "splits": {
+    "train": 1120,
+    "val": 60,
+    "test": 79
+  },
+  "signers_per_split": {
+    "train": [
+      -1
+    ],
+    "val": [
+      -1
+    ],
+    "test": [
+      -1
+    ]
+  },
+  "class_distribution": {
+    "bad": 20,
+    "big large": 21,
+    "cool": 21,
+    "dry": 21,
+    "extra": 21,
+    "fast": 21,
+    "good": 21,
+    "happy": 21,
+    "he": 21,
+    "healthy": 21,
+    "hot": 21,
+    "i": 21,
+    "it": 21,
+    "loud": 21,
+    "narrow": 21,
+    "new": 21,
+    "old": 21,
+    "quiet": 21,
+    "she": 21,
+    "sick": 21
+  },
+  "coverage_warnings": [],
+  "augmentation": {
+    "applied": true,
+    "split": "train only",
+    "rotation_degrees": 12.0,
+    "noise_sigma": 0.015,
+    "mirroring": true,
+    "masked_frames_preserved": true
+  },
+  "seed": 42
+}

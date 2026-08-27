@@ -172,6 +172,22 @@ export default function SignDetection() {
     };
   }, [cameraStatus, isReady, detecting, detect, sendLandmarks, mode]);
 
+
+  // Start on a mode the server can actually serve. Defaulting to ASL when only
+  // the ISL word model is trained would show an empty panel and look broken,
+  // so the first usable mode is selected once the server reports what it has.
+  // Word signs are preferred: that is the model a fluent signer will use.
+  useEffect(() => {
+    const available = {
+      dynamic: dynamicModelInfo?.loaded,
+      isl: islModelInfo?.loaded,
+      static: modelInfo?.loaded,
+    };
+    if (available[mode] || Object.values(available).every((v) => v === undefined)) return;
+    const usable = ['dynamic', 'isl', 'static'].find((name) => available[name]);
+    if (usable) setMode(usable);
+  }, [modelInfo, islModelInfo, dynamicModelInfo]);
+
   const handDetected = landmarks.length > 0;
 
   const toggleDetection = useCallback(() => {

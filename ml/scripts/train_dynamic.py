@@ -66,7 +66,10 @@ import numpy as np  # noqa: E402
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "backend"))
 
-from app.ml.normalization import NORMALIZATION_VERSION, TWO_HAND_FEATURES  # noqa: E402
+from app.ml.normalization import (  # noqa: E402
+    NORMALIZATION_VERSION,
+    SEQUENCE_FEATURES,
+)
 
 PROCESSED_DIR = REPO_ROOT / "ml" / "data" / "processed"
 MODELS_DIR = REPO_ROOT / "ml" / "models"
@@ -85,21 +88,48 @@ def load_split(name: str) -> tuple[np.ndarray, np.ndarray]:
     return np.load(features_path), np.load(targets_path)
 
 
-def build_model(sequence_length: int, num_classes: int, learning_rate: float):
+def build_model(
+    sequence_length: int,
+    num_classes: int,
+    learning_rate: float,
+    bidirectional: bool = False,
+):
     """Assemble the LSTM described in the module docstring."""
     from tensorflow import keras
     from tensorflow.keras import layers
 
     model = keras.Sequential(
         [
-            keras.Input(shape=(sequence_length, TWO_HAND_FEATURES), name="sequence"),
+            keras.Input(shape=(sequence_length, SEQUENCE_FEATURES), name="sequence"),
             # Skip timesteps that are entirely zero — frames where no hand was
             # detected. See the docstring: this is not an optimisation, it
             # changes what the network learns.
             layers.Masking(mask_value=0.0, name="mask_empty_frames"),
-            layers.LSTM(128, return_sequences=True, name="lstm_128"),
-            layers.Dropout(0.3, name="dropout_1"),
-            layers.LSTM(64, name="lstm_64"),
+            *(
+                # Bidirectional reads each clip forwards AND backwards. That is
+                # legitimate here and would not be for live captioning of an
+                # open-ended stream: a window is a COMPLETE segmented gesture by
+                # the time it reaches the model, so its end is already known.
+                # Nothing waits on the future.
+                #
+                # It helps most exactly where this dataset is weakest — very
+                # little data, and pairs of signs that differ only in which
+                # direction the movement runs. Reading backwards makes that
+                # difference visible from the other end too.
+                [
+                    layers.Bidirectional(
+                        layers.LSTM(128, return_sequences=True), name="bilstm_128"
+                    ),
+                    layers.Dropout(0.3, name="dropout_1"),
+                    layers.Bidirectional(layers.LSTM(64), name="bilstm_64"),
+                ]
+                if bidirectional
+                else [
+                    layers.LSTM(128, return_sequences=True, name="lstm_128"),
+                    layers.Dropout(0.3, name="dropout_1"),
+                    layers.LSTM(64, name="lstm_64"),
+                ]
+            ),
             layers.Dropout(0.3, name="dropout_2"),
             layers.Dense(64, activation="relu", name="dense_64"),
             layers.Dense(num_classes, activation="softmax", name="predictions"),
@@ -145,6 +175,8 @@ def main() -> int:
     parser.add_argument("--patience", type=int, default=20)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--no-class-weights", action="store_true")
+    parser.add_argument("--bidirectional", action="store_true",
+                        help="Read each clip forwards and backwards")
     args = parser.parse_args()
 
     import tensorflow as tf
@@ -171,10 +203,10 @@ def main() -> int:
 
     print(f"\nTrain: {X_train.shape}   Val: {X_val.shape}   Classes: {num_classes}")
 
-    if X_train.shape[-1] != TWO_HAND_FEATURES:
+    if X_train.shape[-1] != SEQUENCE_FEATURES:
         print(
             f"ERROR: sequences have {X_train.shape[-1]} features per frame, "
-            f"expected {TWO_HAND_FEATURES}. Re-run extraction.",
+            f"expected {SEQUENCE_FEATURES}. Re-run extraction.",
             file=sys.stderr,
         )
         return 1
@@ -197,7 +229,9 @@ def main() -> int:
         print("  Hand detection, not the classifier, is the limiting factor here.")
 
     # --- model --------------------------------------------------------------
-    model = build_model(sequence_length, num_classes, args.learning_rate)
+    model = build_model(
+        sequence_length, num_classes, args.learning_rate, args.bidirectional
+    )
     model.summary()
 
     class_weights = (
@@ -281,14 +315,23 @@ def main() -> int:
         "task": "WLASL word-level sign classification",
         "trained_at": datetime.now(timezone.utc).isoformat(),
         "normalization_version": NORMALIZATION_VERSION,
-        "input_shape": [sequence_length, TWO_HAND_FEATURES],
+        "input_shape": [sequence_length, SEQUENCE_FEATURES],
         "output_shape": [num_classes],
         "class_names": class_names,
-        "source_dataset": "WLASL processed (risangbaskoro/wlasl-processed)",
+        "source_dataset": manifest.get("source_dataset", "unknown"),
+        # Surfaced to the UI so the mode toggle can say "ISL" rather than a
+        # hardcoded language that may not match what was trained.
+        "language": manifest.get("language", "unknown"),
+        "citation": manifest.get("citation"),
         "self_recorded_data": False,
         "split_strategy": manifest.get("split_strategy"),
         "signer_disjoint": manifest.get("signer_disjoint"),
-        "architecture": "Masking / LSTM128-seq / Drop0.3 / LSTM64 / Drop0.3 / Dense64 / Softmax",
+        "architecture": (
+            "Masking / BiLSTM128-seq / Drop0.3 / BiLSTM64 / Drop0.3 / Dense64 / Softmax"
+            if args.bidirectional
+            else "Masking / LSTM128-seq / Drop0.3 / LSTM64 / Drop0.3 / Dense64 / Softmax"
+        ),
+        "bidirectional": args.bidirectional,
         "hyperparameters": {
             "optimizer": "adam",
             "learning_rate": args.learning_rate,

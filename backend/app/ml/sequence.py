@@ -56,7 +56,7 @@ from typing import Optional
 import numpy as np
 
 from app.config import settings
-from app.ml.normalization import TWO_HAND_FEATURES
+from app.ml.normalization import SEQUENCE_FEATURES, center_sequence_positions
 
 
 class SequenceBuffer:
@@ -115,13 +115,13 @@ class SequenceBuffer:
             # for a hand-free frame, and what the model's Masking layer skips.
             # Storing zeros rather than skipping the frame keeps the window's
             # timing honest — the gap between two signs stays a real gap.
-            frame = np.zeros(TWO_HAND_FEATURES, dtype=np.float32)
+            frame = np.zeros(SEQUENCE_FEATURES, dtype=np.float32)
             self._empty_streak += 1
         else:
             frame = np.asarray(features, dtype=np.float32)
-            if frame.shape != (TWO_HAND_FEATURES,):
+            if frame.shape != (SEQUENCE_FEATURES,):
                 raise ValueError(
-                    f"Expected {TWO_HAND_FEATURES} features, got shape {frame.shape}"
+                    f"Expected {SEQUENCE_FEATURES} features, got shape {frame.shape}"
                 )
             self._empty_streak = 0
 
@@ -150,7 +150,11 @@ class SequenceBuffer:
             return None
 
         self._since_prediction = 0
-        return window
+
+        # Centre position channels over the window, exactly as extraction
+        # centres them over a training clip. Skipping this at inference would
+        # feed the model absolute screen coordinates it never saw in training.
+        return center_sequence_positions(window)
 
     # ------------------------------------------------------------------ #
     # State

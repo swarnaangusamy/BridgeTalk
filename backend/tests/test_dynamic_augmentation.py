@@ -23,7 +23,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from app.ml.normalization import SINGLE_HAND_FEATURES, TWO_HAND_FEATURES
+from app.ml.normalization import (
+    SEQUENCE_FEATURES,
+    SINGLE_HAND_FEATURES,
+    TWO_HAND_FEATURES,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "ml" / "scripts" / "preprocess_dynamic.py"
@@ -49,14 +53,19 @@ def dyn():
 def make_sequence(length: int = 6, empty_at: tuple[int, ...] = ()) -> np.ndarray:
     """A sequence with distinguishable left and right hands."""
     rng = np.random.default_rng(0)
-    sequence = np.zeros((length, TWO_HAND_FEATURES), dtype=np.float32)
+    sequence = np.zeros((length, SEQUENCE_FEATURES), dtype=np.float32)
 
     for index in range(length):
         if index in empty_at:
             continue
         # Left hand positive, right hand negative, so a slot swap is obvious.
         sequence[index, :SINGLE_HAND_FEATURES] = rng.uniform(0.1, 1.0, SINGLE_HAND_FEATURES)
-        sequence[index, SINGLE_HAND_FEATURES:] = -rng.uniform(0.1, 1.0, SINGLE_HAND_FEATURES)
+        sequence[index, SINGLE_HAND_FEATURES:TWO_HAND_FEATURES] = -rng.uniform(
+            0.1, 1.0, SINGLE_HAND_FEATURES
+        )
+        # Wrist positions, same sign convention.
+        sequence[index, TWO_HAND_FEATURES : TWO_HAND_FEATURES + 3] = rng.uniform(0.1, 1.0, 3)
+        sequence[index, TWO_HAND_FEATURES + 3 :] = -rng.uniform(0.1, 1.0, 3)
 
     return sequence
 
@@ -72,7 +81,7 @@ def test_mirroring_swaps_the_hand_slots(dyn):
     mirrored = dyn.mirror_sequence(sequence)
 
     original_left = sequence[:, :SINGLE_HAND_FEATURES]
-    mirrored_right = mirrored[:, SINGLE_HAND_FEATURES:]
+    mirrored_right = mirrored[:, SINGLE_HAND_FEATURES:TWO_HAND_FEATURES]
 
     # Every coordinate should match except x, which is negated. Landmark layout
     # is x,y,z repeating, so x sits at indices 0, 3, 6, ...
@@ -133,13 +142,13 @@ def test_noise_actually_perturbs_real_frames(dyn):
 def test_noise_leaves_an_absent_hand_slot_at_zero(dyn):
     """One hand missing while the other is visible is a normal, valid frame."""
     rng = np.random.default_rng(2)
-    sequence = np.zeros((4, TWO_HAND_FEATURES), dtype=np.float32)
-    sequence[:, SINGLE_HAND_FEATURES:] = 0.5  # right hand only
+    sequence = np.zeros((4, SEQUENCE_FEATURES), dtype=np.float32)
+    sequence[:, SINGLE_HAND_FEATURES:TWO_HAND_FEATURES] = 0.5  # right hand only
 
     noised = dyn.jitter_sequence(sequence, 0.015, rng)
 
     assert np.all(noised[:, :SINGLE_HAND_FEATURES] == 0.0)
-    assert not np.allclose(noised[:, SINGLE_HAND_FEATURES:], 0.5)
+    assert not np.allclose(noised[:, SINGLE_HAND_FEATURES:TWO_HAND_FEATURES], 0.5)
 
 
 # --------------------------------------------------------------------------- #

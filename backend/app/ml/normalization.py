@@ -152,6 +152,103 @@ def normalize_hands(hands: Iterable[dict[str, Any]] | None) -> np.ndarray:
     return features
 
 
+# --- Motion features, for word-level signs only -----------------------------
+# 126 shape floats + 3 position floats per hand.
+SEQUENCE_FEATURES = TWO_HAND_FEATURES + 6
+
+
+def sequence_frame_features(hands: Iterable[dict[str, Any]] | None) -> np.ndarray:
+    """One frame of a WORD sign: hand shape **and** where the hands are.
+
+    WHY THIS EXISTS, AND WHY IT IS NOT normalize_hands
+    --------------------------------------------------
+    `normalize_hands` deliberately destroys position: it moves every wrist to
+    the origin so that the letter A is the letter A wherever it is signed. For
+    fingerspelling that is exactly right, and it is why Model A generalises.
+
+    For word signs it throws away most of the meaning. A word sign is defined
+    by its *trajectory* and its *location* as much as by handshape, and a
+    wrist pinned to the origin in every frame cannot express either — the
+    feature vector is literally identical for a hand held still and a hand
+    sweeping across the body.
+
+    This was not a theory. Trained on shape alone, the model's top confusions
+    were all movement pairs: bad/good, big/small, dry/wet, they/you — words
+    whose handshapes are near-identical and whose difference IS the movement.
+
+    So this appends the raw wrist position of each hand to the 126 shape
+    features. Position is left in image coordinates here; making it
+    translation-invariant is the job of `center_sequence_positions`, which
+    needs the whole window and so cannot happen per frame.
+
+    Returns:
+        float32 array of shape (132,):
+            [0:126]    two-hand shape, exactly as normalize_hands produces
+            [126:129]  left wrist  (x, y, z), zeros if absent
+            [129:132]  right wrist (x, y, z), zeros if absent
+    """
+    features = np.zeros(SEQUENCE_FEATURES, dtype=np.float32)
+    features[:TWO_HAND_FEATURES] = normalize_hands(hands)
+
+    if not hands:
+        return features
+
+    for hand in hands:
+        landmarks = hand.get("landmarks")
+        if not landmarks:
+            continue
+
+        handedness = str(hand.get("handedness", "")).strip().lower()
+        offset = TWO_HAND_FEATURES + (0 if handedness.startswith("l") else 3)
+
+        # Landmark 0 is the wrist, in MediaPipe's image coordinates.
+        wrist = np.asarray(landmarks[0], dtype=np.float32)
+        features[offset : offset + 3] = wrist
+
+    return features
+
+
+def center_sequence_positions(sequence: np.ndarray) -> np.ndarray:
+    """Make a window's position channels translation-invariant.
+
+    Subtracts the mean wrist position over the frames where a hand is actually
+    present, per hand. What survives is movement relative to the sign's own
+    centre — which is what distinguishes one word from another — while where
+    the signer happened to stand is removed.
+
+    Centring over the WINDOW rather than per frame is the whole point: a
+    per-frame centre would be the position itself and would cancel to zero,
+    which is the bug this function exists to avoid.
+
+    Args:
+        sequence: (T, 132) as produced by sequence_frame_features.
+
+    Returns:
+        A copy with the six position channels centred. Shape channels and
+        absent-hand slots are untouched, and frames with no hand stay zero.
+    """
+    out = np.array(sequence, dtype=np.float32, copy=True)
+
+    if out.ndim != 2 or out.shape[1] != SEQUENCE_FEATURES:
+        raise ValueError(
+            f"Expected a (T, {SEQUENCE_FEATURES}) sequence, got {out.shape}"
+        )
+
+    for slot in range(2):
+        start = TWO_HAND_FEATURES + slot * 3
+        block = out[:, start : start + 3]
+
+        # A hand is present in a frame when its position is not all zero.
+        present = np.any(block != 0.0, axis=1)
+        if not present.any():
+            continue
+
+        block[present] -= block[present].mean(axis=0)
+        out[:, start : start + 3] = block
+
+    return out
+
+
 def normalize_primary_hand(hands: Iterable[dict[str, Any]] | None) -> np.ndarray:
     """Normalise the single most relevant hand, for the static model.
 

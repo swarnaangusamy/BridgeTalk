@@ -21,10 +21,23 @@
  */
 
 const MODES = [
-  { id: 'static', label: 'ASL', hint: 'Fingerspelling · one hand' },
-  { id: 'isl', label: 'ISL', hint: 'Fingerspelling · two hands' },
-  { id: 'dynamic', label: 'Words', hint: 'Word signs · experimental' },
+  { id: 'dynamic', label: 'Words', hint: 'Word signs' },
+  { id: 'isl', label: 'ISL letters', hint: 'Fingerspelling · two hands' },
+  { id: 'static', label: 'ASL letters', hint: 'Fingerspelling · one hand' },
 ];
+
+/**
+ * The word-sign model can be trained on Indian or American data, so its label
+ * comes from the model's own metadata rather than a constant here. A toggle
+ * that said "ASL" while an ISL model was loaded would be worse than no label.
+ */
+function hintFor(option, info) {
+  if (option.id !== 'dynamic') return option.hint;
+  const language = info?.language;
+  return language && language !== 'unknown'
+    ? `${language} word signs`
+    : option.hint;
+}
 
 function summarise(info) {
   if (!info) return 'not available';
@@ -82,7 +95,9 @@ export default function RecognitionModeToggle({
               ].join(' ')}
             >
               <span className="block text-sm font-semibold">{option.label}</span>
-              <span className="block text-xs text-slate-400">{option.hint}</span>
+              <span className="block text-xs text-slate-400">
+                {hintFor(option, info)}
+              </span>
             </button>
           );
         })}

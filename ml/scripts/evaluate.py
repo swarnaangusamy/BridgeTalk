@@ -193,6 +193,12 @@ def main() -> int:
                         help="Suffix for figure filenames, e.g. '_dynamic'")
     args = parser.parse_args()
 
+    # Resolve before use: a relative --model/--labels (which is what the usage
+    # examples print) otherwise blows up in relative_to() further down with a
+    # message about subpaths that says nothing about the real problem.
+    args.model = args.model.resolve()
+    args.labels = args.labels.resolve()
+
     if not args.model.is_file():
         print(f"ERROR: {args.model} not found. Train the model first.", file=sys.stderr)
         return 1
@@ -224,7 +230,11 @@ def main() -> int:
               "samples. See the coverage warnings from preprocessing.", file=sys.stderr)
         return 1
 
-    print(f"Model:  {args.model.relative_to(REPO_ROOT)}")
+    try:
+        shown = args.model.relative_to(REPO_ROOT)
+    except ValueError:
+        shown = args.model
+    print(f"Model:  {shown}")
     print(f"Split:  {args.split}  ({len(features):,} samples, {len(class_names)} classes)\n")
 
     model = keras.models.load_model(args.model)
