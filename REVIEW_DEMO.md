@@ -12,12 +12,16 @@ Run through this **the evening before**, not ten minutes before.
 **Software**
 
 - [ ] MySQL running — `mysqladmin -u root -p ping` prints `mysqld is alive`
-- [ ] `ml/models/static_model.keras`, `labels.json`, `metadata.json` present
+- [ ] `ml/models/dynamic_model.keras`, `labels_dynamic.json`,
+      `dynamic_metadata.json` present — **this is the ISL model the demo uses**
+- [ ] `ml/models/static_model.keras` present (the ASL baseline, optional)
 - [ ] `frontend/public/models/hand_landmarker.task` present (~7.5 MB)
 - [ ] `.env` filled in (database URL, JWT secret)
-- [ ] Backend starts clean; `/health` shows `"model": {"loaded": true}`
+- [ ] Backend starts clean; `/health` shows
+      `"dynamic_model": {"loaded": true, "language": "ISL"}`
+- [ ] The **Words** button in the UI is enabled and selected by default
 - [ ] Frontend starts with **no red errors** in the browser console
-- [ ] `pytest backend/tests -q` → 136 passed
+- [ ] `pytest backend/tests -q` → 201 passed
 - [ ] Log in once with each demo account so you know the passwords work
 
 **Physical**
@@ -34,7 +38,15 @@ Run through this **the evening before**, not ten minutes before.
 - [ ] **A screen recording of a working demo saved locally.** If the projector,
       the Wi-Fi or the camera misbehaves, you show the recording and talk over
       it. This costs ten minutes the night before and saves the review.
-- [ ] `docs/images/confusion_matrix.png` open in a tab, ready to show
+- [ ] `docs/images/confusion_matrix_dynamic.png` open in a tab, ready to show
+
+**Rehearse with your signer**
+
+- [ ] Agree on **5-6 words** from the trained vocabulary and practise them
+- [ ] Practise the pause: **sign one word, drop the hands, then the next.**
+      The model is trained on clips containing a single sign, so a continuous
+      stream with no gaps is the one thing it genuinely cannot parse
+- [ ] Check both hands stay in frame — the word model tracks two
 
 ---
 
@@ -47,13 +59,9 @@ Run through this **the evening before**, not ten minutes before.
 > understand sign language without an interpreter. BridgeTalk builds that
 > missing direction."
 
-### 0:30 — The standalone model (60 seconds)
+### 0:30 — What the model sees (60 seconds)
 
-```bash
-python ml/scripts/test_realtime.py
-```
-
-Sign **A**, **B**, **L**, **Y**. Point at the skeleton as it tracks.
+Open the sign-detection page. Have your signer sign one agreed word.
 
 > "Hand tracking is MediaPipe, running locally. It gives 21 joint positions.
 > We classify those 21 points — not the image. That's why this trains in a
@@ -61,7 +69,9 @@ Sign **A**, **B**, **L**, **Y**. Point at the skeleton as it tracks.
 
 Point at the latency figure.
 
-> "Six milliseconds per prediction."
+> "Eighteen milliseconds per prediction. That number was one full second
+> until we compiled the inference graph — the predictions were already
+> correct, just far too late to caption anything."
 
 **Why start here:** it proves the model works before any web plumbing is
 involved. If the browser demo later misbehaves, you have already shown the hard
@@ -79,11 +89,13 @@ Incognito window: log in as `hearing.demo@example.com`, join by code.
 
 ### 3:00 — Both directions (90 seconds)
 
-Sign **H-E-L-L-O** slowly in the deaf window. Hold each letter about a second.
+Have your signer sign **three agreed words**, pausing and dropping the hands
+between each.
 
-> "Watch the confidence bar. A letter is only accepted when it wins seven of
-> the last ten frames — otherwise the output would flicker between letters on
-> every frame."
+> "Each word is recognised from a three-second window of hand movement, not a
+> single frame — a word sign IS the movement. Watch the buffer fill, then the
+> word appear. It is only accepted once it wins the majority vote across
+> several windows; without that the caption would flicker every frame."
 
 Point at the other window as the text appears.
 
@@ -97,16 +109,23 @@ Open the transcript panel.
 
 ### 4:30 — The honest number (30 seconds)
 
-> "90.5% on a held-out test split, 96.9% top-three. It's lower live, and I can
+> "89.9% top-1 on a held-out split of 40 Indian Sign Language words, 96%
+> top-three. It will be lower for a signer the model has never seen, and I can
 > tell you exactly why."
 
-Show the confusion matrix.
+Show the confusion matrix, then say the thing that proves you understand your
+own data:
 
-> "N and M. Both are a closed fist with the thumb tucked among the fingers, and
-> the thumb is the landmark most often hidden by exactly those fingers. We saw
-> it twice, independently: those two letters also had the highest discard rates
-> when we extracted landmarks in the first place. It's a property of reducing
-> a hand to 21 points, not a training bug."
+> "Our first model scored 79.8%, and every mistake it made was a pair like
+> bad/good or big/small — words with nearly the same handshape that differ only
+> in how the hands MOVE. We looked at the features and found the wrist pinned to
+> the origin in every frame: the vector was identical for a hand held still and
+> a hand sweeping across the body. We added hand position, and those confusions
+> disappeared."
+
+> "The remaining honest limit: INCLUDE doesn't record which person signed which
+> clip, so our test set holds out clips, not people. It cannot tell us how well
+> this works for someone new — which is exactly what you are watching now."
 
 ---
 
@@ -251,16 +270,43 @@ is not.
 
 ## 5. Numbers to have memorised
 
+**The demo model — Indian Sign Language, word level (INCLUDE)**
+
 | | |
 |---|---|
-| Test accuracy (top-1 / top-3) | **90.5% / 96.9%** |
-| Validation accuracy | 94.0% |
-| Test set size | 6,440 samples |
-| Classes | 28 |
-| Training time | **62 seconds, CPU** |
-| Model size | 60,892 parameters |
-| Inference latency (median) | **6.2 ms** |
-| Images processed | 87,000 → 66,858 landmark vectors |
+| Test accuracy (top-1 / top-3) | **89.9% / 96.0%** |
+| Validation accuracy | 85.7% |
+| Vocabulary | **40 ISL words** |
+| Test set size | 149 clips |
+| Inference latency (median) | **18 ms** |
+| Clips extracted | 829 of 829 — **0% discard** |
+| Source | INCLUDE, Sridhar et al., ACM MM 2020 |
+| Signer-disjoint split | **No** — INCLUDE records no signer ID |
+
+**The comparison model — ASL fingerspelling (kept as a baseline)**
+
+| | |
+|---|---|
+| Test accuracy (top-1 / top-3) | 90.5% / 96.9% |
+| Classes | 28 letters |
+| Inference latency (median) | **1.7 ms** |
 | Discard rate | 23.2% overall; N worst at 49% |
-| Bandwidth to the server | ~5 KB/s |
-| Tests | 136, all passing |
+
+**Shared**
+
+| | |
+|---|---|
+| Bandwidth to the server | ~5 KB/s (landmarks only, never video) |
+| Tests | 201, all passing |
+
+### The three numbers that came from fixing something
+
+| Fix | Before | After |
+|---|---|---|
+| Added hand position to word features | 79.8% | **84.8%** |
+| Doubled the vocabulary (more data) | 84.8% @ 20 words | **89.9% @ 40 words** |
+| Compiled the inference graph | 1373 ms | **18 ms** |
+
+The last one is the best story: predictions were already *correct* at a full
+second each. Nothing in the output hinted at a problem — they were simply too
+late to caption anything.

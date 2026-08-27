@@ -239,6 +239,78 @@ Folder names are cleaned before use: INCLUDE numbers its word folders per
 category, so `1. hello` and `9. hello` are the same word listed twice, and
 keeping the numbers would train two classes nothing could tell apart.
 
+### Word signs need position; letters must not have it
+
+The most instructive bug in this project. Model B was first trained on the same
+features the alphabet models use, and scored **79.75%** on 20 ISL words. Its top
+confusions were the tell:
+
+| Confusion | Handshape | What actually differs |
+|---|---|---|
+| bad → good | near-identical | movement direction |
+| big large → small little | near-identical | how far the hands travel |
+| dry → wet | near-identical | movement |
+| they → you (plural) | both pointing | direction |
+
+Every one is a movement pair. The cause was visible in the data itself: the
+right-hand wrist read `[0, 0, 0]` in all thirty timesteps, because
+`normalize_hands` puts every wrist at the origin. **The feature vector was
+literally identical for a hand held still and a hand sweeping across the body.**
+
+That behaviour is correct for fingerspelling and is why the alphabet models
+generalise — the letter A is the letter A wherever it is signed. For word signs
+it throws away most of the meaning.
+
+`sequence_frame_features` therefore appends each wrist's position, making a
+frame **132** floats rather than 126, and `center_sequence_positions` centres
+those over the window so that movement survives while where the signer stood
+does not. Only word signs use it.
+
+| | Shape only | **+ position** |
+|---|---|---|
+| Top-1 | 79.75% | **84.81%** |
+| Top-3 | 96.20% | **98.73%** |
+
+`big/small`, `they/you` and `dry/wet` disappeared entirely; `bad/good` halved.
+The fix was chosen from the confusion table, not guessed at, and the table is
+the evidence that it worked.
+
+### Bidirectional, chosen on validation
+
+Reading each clip forwards *and* backwards is legitimate here and would not be
+for open-ended captioning: by the time a window reaches the model it is a
+complete segmented gesture, so nothing waits on future frames.
+
+With only 60 validation samples, one run proves nothing, so the choice was made
+on mean validation accuracy across three seeds — then test was measured **once**,
+after the decision:
+
+| seed | unidirectional | bidirectional |
+|---|---|---|
+| 1 | 80.00% | 85.00% |
+| 2 | 78.33% | 81.67% |
+| 3 | 80.00% | 83.33% |
+| **mean** | **79.44%** | **83.33%** |
+
+### A full second of latency, hiding in plain sight
+
+Replaying real test clips through the live path gave correct predictions — at
+**965 ms each**. Wrapping an LSTM in a `Masking` layer forces Keras onto its
+generic per-timestep path, and eagerly that is one op dispatch per timestep.
+
+| | word model (BiLSTM) | letter model (MLP) |
+|---|---|---|
+| eager `model(x)` | 1373 ms | 6.2 ms |
+| `model.predict()` | 218 ms | 53 ms |
+| **`tf.function` compiled** | **18 ms** | **1.74 ms** |
+
+The predictor now compiles one traced graph at load time. This supersedes the
+earlier "call the model directly, never `predict()`" rule: that was right for
+the MLPs, but only compilation is fast for both.
+
+Nothing in the output would have revealed this. The predictions were correct —
+just a second too late to caption anything.
+
 ### INCLUDE cannot support a signer-disjoint split, and says so
 
 Model B's strongest claim on WLASL is that its test set holds out entire
