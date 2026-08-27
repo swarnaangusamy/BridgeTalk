@@ -1,0 +1,35 @@
+{
+  "name": "bridgetalk-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "BridgeTalk client — React 18 + Vite + Tailwind. Runs MediaPipe HandLandmarker in the browser and streams landmarks (never video) to the FastAPI backend.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "lint": "eslint src --ext js,jsx"
+  },
+  "dependencies": {
+    "@mediapipe/tasks-vision": "0.10.18",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "react-router-dom": "7.18.2"
+  },
+  "devDependencies": {
+    "@types/react": "18.3.17",
+    "@types/react-dom": "18.3.5",
+    "@vitejs/plugin-react": "5.1.1",
+    "autoprefixer": "10.4.20",
+    "eslint": "8.57.1",
+    "eslint-plugin-react": "7.37.2",
+    "eslint-plugin-react-hooks": "4.6.2",
+    "eslint-plugin-react-refresh": "0.4.16",
+    "postcss": "8.5.26",
+    "tailwindcss": "3.4.17",
+    "vite": "7.3.6"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

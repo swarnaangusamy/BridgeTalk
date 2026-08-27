@@ -1,0 +1,163 @@
+-- ===========================================================================
+-- BridgeTalk — database schema (MySQL 8.x / 9.x)
+--
+-- Run it from a terminal:
+--     mysql -u root -p < database/schema.sql
+--
+-- Or in MySQL Workbench:
+--     File → Open SQL Script… → pick this file → click the lightning bolt.
+--
+-- This script is idempotent: every statement uses IF NOT EXISTS, so running it
+-- twice is harmless and never destroys data.
+--
+-- NOTE: this file is the authoritative, human-readable schema. The SQLAlchemy
+-- models in backend/app/models/ mirror it exactly. If you change one, change
+-- the other — backend/tests/test_schema_parity.py fails if they drift.
+-- ===========================================================================
+
+-- ---------------------------------------------------------------------------
+-- Database and application user
+-- ---------------------------------------------------------------------------
+-- utf8mb4 is the real Unicode character set in MySQL. The older `utf8` alias
+-- stores at most 3 bytes per character and cannot hold emoji or many
+-- non-Latin scripts — a genuine problem for a multilingual accessibility tool.
+CREATE DATABASE IF NOT EXISTS bridgetalk
+  CHARACTER SET utf8mb4
+  COLLATE utf8mb4_0900_ai_ci;
+
+-- A dedicated least-privilege user. The application never connects as root:
+-- if the API were ever compromised, the blast radius is this one database
+-- rather than the whole MySQL server.
+--
+-- Replace 'CHANGE_ME' with a real password, then put the SAME password in
+-- DATABASE_URL inside .env (which is gitignored).
+CREATE USER IF NOT EXISTS 'bridgetalk'@'localhost' IDENTIFIED BY 'CHANGE_ME';
+GRANT SELECT, INSERT, UPDATE, DELETE ON bridgetalk.* TO 'bridgetalk'@'localhost';
+FLUSH PRIVILEGES;
+
+USE bridgetalk;
+
+-- ---------------------------------------------------------------------------
+-- users
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS users (
+  id            INT AUTO_INCREMENT PRIMARY KEY,
+  name          VARCHAR(120)  NOT NULL,
+  email         VARCHAR(255)  NOT NULL,
+  -- A bcrypt hash, never a password. 60 chars today; sized for a future
+  -- switch to argon2 without a migration.
+  password_hash VARCHAR(255)  NOT NULL,
+  -- Selects which side of the meeting UI the user gets. It is a UI hint, not
+  -- a permission boundary — both roles may use both translation directions.
+  role          ENUM('deaf','hearing') NOT NULL DEFAULT 'hearing',
+  created_at    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+  -- The UNIQUE constraint is the real guarantee that two accounts cannot
+  -- share an email. An application-level check alone loses to a race between
+  -- two simultaneous registrations.
+  UNIQUE KEY uq_users_email (email)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ---------------------------------------------------------------------------
+-- meetings
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS meetings (
+  id                INT AUTO_INCREMENT PRIMARY KEY,
+  -- Short, human-typable join code, e.g. 'K7Q-2M4'. Every join looks a
+  -- meeting up by this column, never by id, so it is indexed and unique.
+  code              VARCHAR(16)  NOT NULL,
+  title             VARCHAR(200) NOT NULL,
+  host_id           INT          NOT NULL,
+  is_interview_mode BOOLEAN      NOT NULL DEFAULT FALSE,
+  -- Set when the first participant joins, not at creation time: a meeting
+  -- created on Monday for Friday must not report a Monday start.
+  started_at        DATETIME     NULL,
+  -- NULL while the meeting is live. This is exactly the filter the history
+  -- endpoint uses to separate active meetings from finished ones.
+  ended_at          DATETIME     NULL,
+  created_at        DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+  UNIQUE KEY uq_meetings_code (code),
+  KEY ix_meetings_host (host_id),
+
+  -- ON DELETE CASCADE: deleting a user removes the meetings they hosted,
+  -- rather than leaving rows pointing at a user id that no longer exists.
+  CONSTRAINT fk_meetings_host
+    FOREIGN KEY (host_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ---------------------------------------------------------------------------
+-- meeting_participants
+-- ---------------------------------------------------------------------------
+-- A log, not a set. Rejoining after a dropped connection inserts a NEW row
+-- instead of updating the old one, so the attendance history stays truthful
+-- about disconnections.
+CREATE TABLE IF NOT EXISTS meeting_participants (
+  id         INT AUTO_INCREMENT PRIMARY KEY,
+  meeting_id INT      NOT NULL,
+  user_id    INT      NOT NULL,
+  joined_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  left_at    DATETIME NULL,
+
+  KEY ix_participants_meeting (meeting_id),
+  KEY ix_participants_user (user_id),
+  -- "Is this user currently in this meeting?" filters on both columns at
+  -- once, so a composite index serves it in one lookup.
+  KEY ix_participant_meeting_user (meeting_id, user_id),
+
+  CONSTRAINT fk_participants_meeting
+    FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE,
+  CONSTRAINT fk_participants_user
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ---------------------------------------------------------------------------
+-- transcripts
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS transcripts (
+  id         INT AUTO_INCREMENT PRIMARY KEY,
+  meeting_id INT   NOT NULL,
+  user_id    INT   NOT NULL,
+  -- Which of the two translation directions produced this line. Keeping them
+  -- distinguishable is what lets the transcript panel label speakers, and
+  -- what allows sign accuracy to be reported separately from speech accuracy.
+  source     ENUM('sign','speech') NOT NULL,
+  content    TEXT  NOT NULL,
+  -- NULL for speech lines. The Web Speech API reports a confidence value, but
+  -- it is not comparable to our model's softmax probability, so averaging the
+  -- two would produce a meaningless number.
+  confidence FLOAT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+  KEY ix_transcripts_meeting (meeting_id),
+  KEY ix_transcripts_user (user_id),
+  -- Every read is "meeting X's lines in time order", so index the pair.
+  KEY ix_transcript_meeting_created (meeting_id, created_at),
+
+  CONSTRAINT fk_transcripts_meeting
+    FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE,
+  CONSTRAINT fk_transcripts_user
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ---------------------------------------------------------------------------
+-- focus_events
+-- ---------------------------------------------------------------------------
+-- Interview Mode. These three event types are genuinely everything the browser
+-- will tell us: it cannot see a second monitor, a phone, or another person in
+-- the room. This is a deterrent, not proctoring — see the README.
+CREATE TABLE IF NOT EXISTS focus_events (
+  id         INT AUTO_INCREMENT PRIMARY KEY,
+  meeting_id INT NOT NULL,
+  user_id    INT NOT NULL,
+  event_type ENUM('blur','hidden','return') NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+  KEY ix_focus_meeting (meeting_id),
+  KEY ix_focus_user (user_id),
+
+  CONSTRAINT fk_focus_meeting
+    FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE,
+  CONSTRAINT fk_focus_user
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

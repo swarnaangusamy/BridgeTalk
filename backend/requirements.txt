@@ -1,0 +1,62 @@
+# ============================================================================
+# BridgeTalk — Python dependencies (Python 3.11)
+# ----------------------------------------------------------------------------
+# Every version is PINNED on purpose. Version drift is the single most common
+# reason a student project that worked last week fails on review day.
+#
+# Install:
+#   python3.11 -m venv .venv
+#   source .venv/bin/activate         (Windows: .venv\Scripts\activate)
+#   pip install -r backend/requirements.txt
+#
+# NOTE ON TENSORFLOW: 2.16.2 is the last release that ships macOS x86_64
+# (Intel Mac) wheels. If you are on Apple Silicon, Windows or Linux you may
+# raise this to 2.17.x, but then also relax the numpy pin below.
+# ============================================================================
+
+# --- Web framework / server -------------------------------------------------
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+websockets==14.1
+
+# --- Configuration / validation ---------------------------------------------
+pydantic==2.10.4
+pydantic-settings==2.7.0
+python-dotenv==1.0.1
+email-validator==2.2.0
+
+# --- Database ---------------------------------------------------------------
+SQLAlchemy==2.0.36
+PyMySQL==1.1.1
+# Required by PyMySQL for MySQL 8+/9+ `caching_sha2_password` authentication.
+cryptography==44.0.0
+
+# --- Auth -------------------------------------------------------------------
+python-jose[cryptography]==3.3.0
+passlib==1.7.4
+# passlib 1.7.4 reads bcrypt.__about__.__version__, which bcrypt >= 4.1 removed.
+# Pinning to 4.0.1 avoids the noisy "error reading bcrypt version" warning.
+bcrypt==4.0.1
+
+# --- Machine learning -------------------------------------------------------
+tensorflow==2.16.2
+# TensorFlow 2.16 and MediaPipe 0.10.x both require the NumPy 1.x ABI.
+numpy==1.26.4
+mediapipe==0.10.14
+opencv-python==4.10.0.84
+scikit-learn==1.5.2
+pandas==2.2.3
+
+# --- Plots / reporting ------------------------------------------------------
+matplotlib==3.9.2
+seaborn==0.13.2
+
+# --- Dataset acquisition / CLI ergonomics -----------------------------------
+kaggle==1.6.17
+tqdm==4.67.1
+
+# --- Testing ----------------------------------------------------------------
+pytest==8.3.4
+pytest-asyncio==0.25.0
+httpx==0.28.1
