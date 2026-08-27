@@ -290,6 +290,10 @@ class SignPredictor:
             "val_accuracy": self.metadata.get("metrics", {}).get("val_accuracy"),
             "trained_at": self.metadata.get("trained_at"),
             "source_dataset": self.metadata.get("source_dataset"),
+            # Which sign language this model was trained on. The UI labels the
+            # mode toggle from this rather than a hardcoded string, so a toggle
+            # cannot claim "ASL" while an ISL model is loaded.
+            "language": self.metadata.get("language"),
             "signer_disjoint": self.metadata.get("signer_disjoint"),
         }
 
