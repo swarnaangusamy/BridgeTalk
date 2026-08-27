@@ -275,6 +275,30 @@ does not. Only word signs use it.
 The fix was chosen from the confusion table, not guessed at, and the table is
 the evidence that it worked.
 
+### Vocabulary size: 40 is a peak, not a ceiling reached
+
+The obvious assumption is that more classes always means lower accuracy. It did
+not hold here, and the shape of the curve is the interesting part:
+
+| Vocabulary | Train sequences | Top-1 | Top-3 |
+|---|---|---|---|
+| 20 words | 1,120 | 84.81% | **98.73%** |
+| **40 words** | **2,236** | **89.93%** | 95.97% |
+| 70 words | 3,504 | 78.99% | 92.02% |
+
+Going from 20 to 40 words **raised** top-1 by five points. The model was
+data-starved, and doubling the vocabulary doubled the training data; that
+mattered more than the extra classes cost.
+
+Going from 40 to 70 lost eleven points, and the reason is in the dataset rather
+than the model. INCLUDE's clip counts are very uneven: 48 words have 20-21
+clips, then it falls off a cliff to 14 and then 8. Words past the fortieth bring
+too few examples to learn from while still competing for probability mass, so
+they dilute the model instead of enriching it.
+
+**Choose the vocabulary by where the clip counts fall off, not by how many words
+sound impressive.** For this dataset that boundary is around 40.
+
 ### Bidirectional, chosen on validation
 
 Reading each clip forwards *and* backwards is legitimate here and would not be

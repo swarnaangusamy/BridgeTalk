@@ -305,6 +305,7 @@ is not.
 |---|---|---|
 | Added hand position to word features | 79.8% | **84.8%** |
 | Doubled the vocabulary (more data) | 84.8% @ 20 words | **89.9% @ 40 words** |
+| Pushed to 70 words | 89.9% @ 40 | 79.0% — *worse*, so we kept 40 |
 | Compiled the inference graph | 1373 ms | **18 ms** |
 
 The last one is the best story: predictions were already *correct* at a full
