@@ -23,6 +23,10 @@ export default function SubtitleBar({ subtitle }) {
   }
 
   const isSign = subtitle.source === 'sign';
+  // An icon as well as a colour and a word: the source must survive colour
+  // blindness, a monochrome projector, and a glance from across the room.
+  const sourceIcon = isSign ? '🤟' : '🎤';
+  const sourceLabel = isSign ? 'Sign' : 'Speech';
 
   return (
     <div
@@ -36,7 +40,7 @@ export default function SubtitleBar({ subtitle }) {
             isSign ? 'bg-bridge-500/20 text-bridge-400' : 'bg-signal-ok/20 text-signal-ok'
           }`}
         >
-          {isSign ? 'Signed' : 'Spoken'}
+          <span aria-hidden="true">{sourceIcon}</span> {sourceLabel}
         </span>
         {subtitle.speaker}
         {/* Interim speech results are revised word by word as more is heard;
@@ -44,7 +48,15 @@ export default function SubtitleBar({ subtitle }) {
         {subtitle.isFinal === false && <span className="italic text-slate-500">· hearing…</span>}
       </p>
 
-      <p className="text-subtitle break-words text-slate-50">{subtitle.text}</p>
+      {/* Interim text is lighter and italic, so a reader can tell at a glance
+          which words are settled and which may still be revised. */}
+      <p
+        className={`text-subtitle break-words ${
+          subtitle.isFinal === false ? 'italic text-slate-300/80' : 'text-slate-50'
+        }`}
+      >
+        {subtitle.text}
+      </p>
     </div>
   );
 }

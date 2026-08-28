@@ -4,6 +4,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import HandOverlayCanvas from '../components/HandOverlayCanvas';
 import ModeSwitch from '../components/ModeSwitch';
 import SignDetectionPanel from '../components/SignDetectionPanel';
+import SpeechControls from '../components/SpeechControls';
 import SubtitleBar from '../components/SubtitleBar';
 import TranscriptPanel from '../components/TranscriptPanel';
 import VideoTile from '../components/VideoTile';
@@ -52,6 +53,10 @@ export default function MeetingRoom() {
   const [micOn, setMicOn] = useState(true);
   const [cameraOn, setCameraOn] = useState(true);
   const [speechOn, setSpeechOn] = useState(false);
+  // en-IN by default: the demo is in India, and the Indian English
+  // acoustic model recognises local accents markedly better than en-US.
+  const [speechLanguage, setSpeechLanguage] = useState('en-IN');
+  const [speechProvider, setSpeechProvider] = useState('webspeech');
   const [transcriptCollapsed, setTranscriptCollapsed] = useState(false);
 
   const [subtitle, setSubtitle] = useState(null);
@@ -332,13 +337,14 @@ export default function MeetingRoom() {
 
   const speech = useSpeechToText({
     enabled: speechOn,
+    language: speechLanguage,
+    provider: speechProvider,
+    meetingCode: code,
     onResult: handleSpeechResult,
   });
 
-  useEffect(() => {
-    if (speechOn) speech.start();
-    else speech.stop();
-  }, [speechOn, speech]);
+  // The hook already starts and stops itself from `enabled`; calling start()
+  // again here would race it. Kept as a single source of truth deliberately.
 
   // --- Interview Mode ------------------------------------------------------
   // Enabled per meeting, chosen by the host at creation time. Each focus
@@ -488,7 +494,7 @@ export default function MeetingRoom() {
             </button>
             <button type="button" onClick={() => setSpeechOn((v) => !v)}
                     aria-pressed={speechOn} disabled={!speech.isSupported}
-                    title={speech.isSupported ? undefined : 'Your browser does not support the Web Speech API'}
+                    title={speech.isSupported ? undefined : 'No speech engine works in this browser'}
                     className="rounded-lg border border-ink-700 px-3 py-2 text-sm hover:bg-ink-700 disabled:opacity-50">
               Speech captions: {speechOn ? 'on' : 'off'}
             </button>
@@ -525,6 +531,21 @@ export default function MeetingRoom() {
             onModeChange={setRecognitionMode}
             onClear={clearSentence}
             onBackspace={backspace}
+          />
+
+          <SpeechControls
+            enabled={speechOn}
+            onToggle={() => setSpeechOn((value) => !value)}
+            providerId={speech.providerId}
+            onProviderChange={setSpeechProvider}
+            language={speechLanguage}
+            onLanguageChange={setSpeechLanguage}
+            state={speech.state}
+            providerName={speech.providerName}
+            providerNote={speech.providerNote}
+            providesInterim={speech.providesInterim}
+            notice={speech.notice}
+            error={speech.error}
           />
 
           <div className="min-h-[18rem] flex-1">

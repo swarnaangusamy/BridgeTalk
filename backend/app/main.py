@@ -18,7 +18,7 @@ from app.api import auth, meetings, transcripts
 from app.config import settings
 from app.database import engine, init_db
 from app.ml.predictor import dynamic_predictor, isl_predictor, predictor
-from app.ws import inference, signaling
+from app.ws import inference, signaling, transcribe
 from app.ws.connection_manager import inference_manager, signaling_manager
 
 logging.basicConfig(
@@ -90,6 +90,15 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("Word-sign recognition not available — %s", dynamic_predictor.load_error)
 
+    # Whisper is the FALLBACK speech provider, so its absence is normal: most
+    # demos use the browser's Web Speech API and never touch it. Logged at INFO
+    # and never fatal — the transcribe socket reports MODEL_NOT_LOADED to any
+    # client that asks for it.
+    if transcribe.transcriber.load():
+        logger.info("Whisper speech-to-text ready (%s)", transcribe.transcriber.model_size)
+    else:
+        logger.info("Whisper not available — %s", transcribe.transcriber.load_error)
+
     yield
 
     logger.info("BridgeTalk backend shutting down")
@@ -127,6 +136,7 @@ app.include_router(meetings.router)
 app.include_router(transcripts.router)
 app.include_router(inference.router)
 app.include_router(signaling.router)
+app.include_router(transcribe.router)
 
 
 @app.get("/health", tags=["system"], summary="Liveness and database probe")
@@ -158,6 +168,11 @@ def health() -> dict:
         "model": predictor.describe(),
         "isl_model": isl_predictor.describe(),
         "dynamic_model": dynamic_predictor.describe(),
+        "speech_to_text": {
+            "whisper_loaded": transcribe.transcriber.is_loaded,
+            "whisper_model": transcribe.transcriber.model_size,
+            "whisper_error": transcribe.transcriber.load_error,
+        },
         "websockets": {
             "inference": inference_manager.stats(),
             "signaling": signaling_manager.stats(),

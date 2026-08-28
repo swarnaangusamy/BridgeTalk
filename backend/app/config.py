@@ -66,6 +66,15 @@ class Settings(BaseSettings):
     isl_metadata_path: str = "ml/models/isl_metadata.json"
     isl_labels_path: str = "ml/models/labels_isl.json"
 
+    # --- Speech to text (Whisper fallback) --------------------------------
+    # Only used when the browser cannot run the Web Speech API, or when the
+    # user does not want audio sent to Google. "base" is ~150 MB and runs
+    # comfortably on CPU; "tiny" is faster and worse, "small" the reverse.
+    whisper_model_size: str = "base"
+    # Kept inside the repo (gitignored) rather than ~/.cache, so the download
+    # is visible, obviously disposable, and cannot silently happen twice.
+    whisper_cache_dir: str = "ml/models/whisper"
+
     # --- Real-time smoothing (Section 9 of the build spec) ----------------
     confidence_threshold: float = 0.80
     cooldown_ms: int = 1500

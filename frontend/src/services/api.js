@@ -157,4 +157,20 @@ export function buildPredictSocketUrl(meetingCode) {
   )}`;
 }
 
+/**
+ * Build the URL for the Whisper transcription WebSocket.
+ *
+ * Separate from the inference socket on purpose: this one carries binary AUDIO
+ * upstream, has a completely different message contract, and only exists when
+ * the Whisper provider is selected. Multiplexing audio onto the socket that
+ * carries landmarks and captions would mean a transcription failure could take
+ * sign recognition down with it.
+ */
+export function buildTranscribeSocketUrl(meetingCode) {
+  const token = getToken();
+  return `${WS_BASE_URL}/ws/transcribe/${encodeURIComponent(
+    meetingCode,
+  )}?token=${encodeURIComponent(token ?? '')}`;
+}
+
 export { API_BASE_URL, WS_BASE_URL };

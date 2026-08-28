@@ -48,6 +48,25 @@ opencv-python==4.10.0.84
 scikit-learn==1.5.2
 pandas==2.2.3
 
+# --- Speech to text (Whisper fallback) --------------------------------------
+# ONLY needed for the Whisper speech provider. The default provider is the
+# browser's Web Speech API, which needs nothing here — a deployment that never
+# switches engines can leave these uninstalled and the backend still starts.
+# backend/app/ws/transcribe.py imports faster_whisper lazily and reports
+# MODEL_NOT_LOADED rather than crashing when it is absent.
+#
+# NOTE: installing the package does NOT download the model. The `base` model
+# (~150 MB) is fetched on first use into ml/models/whisper/. Pre-download it
+# before a demo — see README, "Pre-downloading the Whisper model".
+#
+# ffmpeg is also required and is NOT a pip package:
+#   macOS:  brew install ffmpeg
+#   Ubuntu: sudo apt install ffmpeg
+faster-whisper==1.0.3
+# Pinned explicitly: faster-whisper's own floor is looser than what we have
+# tested against, and CTranslate2 breaks its Python ABI between minor versions.
+ctranslate2==4.4.0
+
 # --- Plots / reporting ------------------------------------------------------
 matplotlib==3.9.2
 seaborn==0.13.2
