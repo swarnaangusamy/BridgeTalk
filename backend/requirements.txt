@@ -57,7 +57,17 @@ pandas==2.2.3
 #
 # NOTE: installing the package does NOT download the model. The `base` model
 # (~150 MB) is fetched on first use into ml/models/whisper/. Pre-download it
-# before a demo — see README, "Pre-downloading the Whisper model".
+# before a demo:
+#
+#   HF_HUB_DISABLE_XET=1 python -c "from faster_whisper import WhisperModel; \
+#       WhisperModel('base', device='cpu', compute_type='int8', \
+#                    download_root='ml/models/whisper')"
+#
+# HF_HUB_DISABLE_XET=1 is not optional folklore. huggingface_hub pulls in
+# `hf-xet`, its newer transfer backend, and on this machine that stalled at
+# 0 bytes indefinitely with no error — the small tokenizer files arrived and
+# the 145 MB weights never started. Disabling it forces the plain HTTP path,
+# which completed in ~10 minutes.
 #
 # ffmpeg is also required and is NOT a pip package:
 #   macOS:  brew install ffmpeg
@@ -65,7 +75,9 @@ pandas==2.2.3
 faster-whisper==1.0.3
 # Pinned explicitly: faster-whisper's own floor is looser than what we have
 # tested against, and CTranslate2 breaks its Python ABI between minor versions.
-ctranslate2==4.4.0
+# 4.8.1 is what pip resolves here and what this project was verified against;
+# it does NOT drag numpy to 2.x, which would break the TensorFlow 2.16 pin.
+ctranslate2==4.8.1
 
 # --- Plots / reporting ------------------------------------------------------
 matplotlib==3.9.2

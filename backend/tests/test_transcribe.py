@@ -202,6 +202,22 @@ def test_buffer_is_reusable_after_an_utterance():
 # --------------------------------------------------------------------------- #
 
 
+def _whisper_installed() -> bool:
+    """Is the PACKAGE importable? Distinct from whether load() has been called.
+
+    An earlier version of these tests guarded on `transcriber.is_loaded`, which
+    is False before anything calls load() even when faster-whisper is perfectly
+    well installed — so the "not installed" test ran on a machine that had it
+    and failed. The condition being tested is availability, not lifecycle.
+    """
+    try:
+        import faster_whisper  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+@pytest.mark.skipif(_whisper_installed(), reason="faster-whisper IS installed here")
 def test_transcriber_reports_a_useful_error_when_unavailable():
     """Whisper is the FALLBACK provider. A backend without it must still start.
 
@@ -210,23 +226,58 @@ def test_transcriber_reports_a_useful_error_when_unavailable():
     """
     from app.ws.transcribe import transcriber
 
-    if transcriber.is_loaded:
-        pytest.skip("Whisper is installed here, so the missing path cannot run")
-
     assert transcriber.load() is False
     assert transcriber.load_error, "a failed load must explain itself"
     # The message has to tell somebody what to actually do about it.
-    assert "install" in transcriber.load_error.lower() or "failed" in transcriber.load_error.lower()
+    assert "install" in transcriber.load_error.lower()
 
 
-def test_predicting_without_a_model_raises_rather_than_returning_nonsense():
+def test_predicting_without_a_loaded_model_raises_rather_than_returning_nonsense():
+    """A fresh transcriber has no model, whether or not the package exists.
+
+    Returning empty text here would be worse than raising: the socket would
+    emit blank captions forever and look like a microphone problem.
+    """
+    from app.ws.transcribe import WhisperTranscriber
+
+    fresh = WhisperTranscriber()
+    with pytest.raises(RuntimeError):
+        fresh.transcribe(speech(1.0), "en-IN")
+
+
+# --------------------------------------------------------------------------- #
+# Real transcription — only where the model is actually present
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.skipif(not _whisper_installed(), reason="faster-whisper not installed")
+def test_whisper_does_not_hallucinate_words_from_silence():
+    """The single most important property of this integration.
+
+    Whisper is well known for inventing confident text when given silence, and
+    our energy-based VAD will occasionally hand it a near-silent chunk. If that
+    produced words, the transcript would fill with sentences nobody said —
+    far worse than missing a caption.
+    """
     from app.ws.transcribe import transcriber
 
-    if transcriber.is_loaded:
-        pytest.skip("Whisper is installed here")
+    if not transcriber.is_loaded and not transcriber.load():
+        pytest.skip(f"model unavailable: {transcriber.load_error}")
 
-    with pytest.raises(RuntimeError):
-        transcriber.transcribe(speech(1.0), "en-IN")
+    text, _confidence = transcriber.transcribe(silence(2.0), "en-IN")
+    assert text == "", f"hallucinated {text!r} from silence"
+
+
+@pytest.mark.skipif(not _whisper_installed(), reason="faster-whisper not installed")
+def test_whisper_does_not_hallucinate_words_from_a_pure_tone():
+    """A tone is not speech. Neither is a fan, a door, or a chair scraping."""
+    from app.ws.transcribe import transcriber
+
+    if not transcriber.is_loaded and not transcriber.load():
+        pytest.skip(f"model unavailable: {transcriber.load_error}")
+
+    text, _confidence = transcriber.transcribe(speech(3.0), "en-IN")
+    assert text == "", f"hallucinated {text!r} from a sine wave"
 
 
 # --------------------------------------------------------------------------- #
