@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { transcripts as transcriptsApi } from '../services/api';
 
@@ -30,6 +30,29 @@ export default function TranscriptPanel({ lines, meetingId, collapsed, onToggle 
     pinnedToBottomRef.current = scrollHeight - scrollTop - clientHeight < 40;
   }
 
+  // 'idle' | 'working' | 'done' | 'error'
+  const [downloadState, setDownloadState] = useState('idle');
+  const [downloadError, setDownloadError] = useState(null);
+
+  const handleDownload = useCallback(async () => {
+    if (!meetingId) return;
+
+    setDownloadState('working');
+    setDownloadError(null);
+    try {
+      await transcriptsApi.download(meetingId);
+      setDownloadState('done');
+      // Back to the neutral label after a moment. A button stuck on "Saved"
+      // reads as though a second download would do nothing.
+      setTimeout(() => setDownloadState('idle'), 2500);
+    } catch (error) {
+      // Say what went wrong. The previous version of this control failed
+      // silently with a 401 that only appeared in the network tab.
+      setDownloadState('error');
+      setDownloadError(error.message ?? 'Download failed');
+    }
+  }, [meetingId]);
+
   if (collapsed) {
     return (
       <button
@@ -51,18 +74,21 @@ export default function TranscriptPanel({ lines, meetingId, collapsed, onToggle 
         </h2>
         <div className="flex items-center gap-2">
           {meetingId && (
-            <a
-              href={transcriptsApi.exportUrl(meetingId)}
-              className="rounded-md border border-ink-700 px-2 py-1 text-xs hover:bg-ink-700"
-              // The export endpoint requires a bearer token, which a plain
-              // link cannot send. Opening in a new tab lets the user save it
-              // from the browser's own viewer while logged in via the API docs;
-              // the reliable route is the Download button below.
-              target="_blank"
-              rel="noreferrer"
+            // A button, not a link: the export endpoint needs an Authorization
+            // header, and a browser navigation cannot send one. See
+            // transcripts.download() in services/api.js.
+            <button
+              type="button"
+              onClick={handleDownload}
+              disabled={downloadState === 'working'}
+              className="rounded-md border border-ink-700 px-2 py-1 text-xs hover:bg-ink-700 disabled:opacity-50"
             >
-              Open export
-            </a>
+              {downloadState === 'working'
+                ? 'Saving…'
+                : downloadState === 'done'
+                  ? 'Saved ✓'
+                  : 'Download .txt'}
+            </button>
           )}
           <button
             type="button"
@@ -74,6 +100,15 @@ export default function TranscriptPanel({ lines, meetingId, collapsed, onToggle 
           </button>
         </div>
       </header>
+
+      {downloadError && (
+        <p
+          className="mb-2 rounded-lg border border-signal-bad/40 bg-signal-bad/10 p-2 text-xs text-signal-bad"
+          role="alert"
+        >
+          {downloadError}
+        </p>
+      )}
 
       <ol
         ref={listRef}

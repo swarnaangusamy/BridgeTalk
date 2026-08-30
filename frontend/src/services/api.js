@@ -135,7 +135,70 @@ export const transcripts = {
       body: { meeting_id: meetingId, source, content, confidence },
     }),
   list: (meetingId) => request(`/api/transcripts/${meetingId}`),
+
+  // Kept for the API-docs route and for tests. Note that opening this URL
+  // directly in a browser returns 401: a plain navigation cannot carry the
+  // Authorization header. Use `download` below for anything user-facing.
   exportUrl: (meetingId) => `${API_BASE_URL}/api/transcripts/${meetingId}/export`,
+
+  /**
+   * Download the transcript as a .txt file.
+   *
+   * WHY THIS IS NOT JUST AN <a href>
+   * --------------------------------
+   * The export endpoint is member-only and authenticated by a bearer token.
+   * A plain link triggers a browser navigation, and a navigation cannot set
+   * request headers — so the server sees no token and answers 401. That was
+   * exactly the bug this replaced: the button looked right and produced an
+   * authentication error instead of a file.
+   *
+   * So we fetch it properly, turn the response into a Blob, and click a
+   * temporary anchor pointed at an object URL. That is the standard way to
+   * save an authenticated file from JavaScript.
+   *
+   * The filename comes from the server's Content-Disposition header when it is
+   * present, so the name stays owned by whoever generates the file rather than
+   * being duplicated — and drifting — on both sides.
+   */
+  download: async (meetingId) => {
+    const token = getToken();
+
+    const response = await fetch(
+      `${API_BASE_URL}/api/transcripts/${meetingId}/export`,
+      { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+    );
+
+    if (!response.ok) {
+      throw new ApiError(
+        response.status === 403
+          ? 'You are not a participant in this meeting.'
+          : `Could not download the transcript (HTTP ${response.status})`,
+        response.status,
+        null,
+      );
+    }
+
+    const disposition = response.headers.get('Content-Disposition') ?? '';
+    const match = disposition.match(/filename="?([^"]+)"?/);
+    const filename = match ? match[1] : `bridgetalk-transcript-${meetingId}.txt`;
+
+    const blob = await response.blob();
+    const objectUrl = URL.createObjectURL(blob);
+
+    const anchor = document.createElement('a');
+    anchor.href = objectUrl;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+
+    // Revoking frees the blob. Without it the file stays in memory for the
+    // lifetime of the tab, which in a long meeting means every download the
+    // user ever made is still held.
+    URL.revokeObjectURL(objectUrl);
+
+    return filename;
+  },
 };
 
 // --- system ----------------------------------------------------------------
