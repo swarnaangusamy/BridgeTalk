@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 
+import TranscriptDownloadButton from '../components/TranscriptDownloadButton';
 import { meetings as meetingsApi } from '../services/api';
 
 /** Past and active meetings the signed-in user hosted or attended. */
@@ -81,6 +82,12 @@ export default function History() {
               >
                 {meeting.is_active ? 'Active' : 'Ended'}
               </span>
+
+              {/* Offered for ended meetings too — arguably especially for
+                  those, since a finished conversation is exactly the one you
+                  want a record of. A meeting with no lines still downloads,
+                  and the file says so rather than failing. */}
+              <TranscriptDownloadButton meetingId={meeting.id} />
 
               {meeting.is_active && (
                 <Link to={`/meeting/${meeting.code}`} className="btn-primary">
