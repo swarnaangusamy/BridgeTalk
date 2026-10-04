@@ -79,6 +79,12 @@ faster-whisper==1.0.3
 # it does NOT drag numpy to 2.x, which would break the TensorFlow 2.16 pin.
 ctranslate2==4.8.1
 
+# --- PDF transcript export --------------------------------------------------
+# Pure Python, no system libraries. Imported lazily inside the one endpoint
+# that needs it, so a deployment that never exports a PDF pays nothing at
+# startup — the same pattern as TensorFlow and faster-whisper.
+reportlab==4.2.5
+
 # --- Plots / reporting ------------------------------------------------------
 matplotlib==3.9.2
 seaborn==0.13.2

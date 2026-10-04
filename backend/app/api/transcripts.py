@@ -1,9 +1,10 @@
 """Transcript endpoints: append, fetch, export."""
 
+import io
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, status
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
@@ -125,6 +126,142 @@ def get_transcript(meeting_id: int, db: DbSession, current_user: CurrentUser) ->
     return [_to_public(row) for row in rows]
 
 
+def _transcript_header(meeting, row_count: int) -> list[tuple[str, str]]:
+    """The metadata block shown at the top of every export, in both formats.
+
+    Built once and shared so the .txt and .pdf cannot drift apart — two copies
+    of "which fields go in the header" is exactly the kind of thing that ends
+    up disagreeing after one of them is edited.
+    """
+    return [
+        ("Meeting", meeting.title),
+        ("Code", meeting.code),
+        ("Started", meeting.started_at.isoformat() if meeting.started_at else "not started"),
+        ("Ended", meeting.ended_at.isoformat() if meeting.ended_at else "still active"),
+        ("Lines", str(row_count)),
+    ]
+
+
+def _transcript_rows(db, meeting_id: int):
+    """Transcript rows in conversation order, speaker eagerly loaded."""
+    return db.scalars(
+        select(Transcript)
+        .where(Transcript.meeting_id == meeting_id)
+        .options(selectinload(Transcript.user))
+        .order_by(Transcript.created_at.asc(), Transcript.id.asc())
+    ).all()
+
+
+@router.get(
+    "/{meeting_id}/export.pdf",
+    summary="Download the transcript as a PDF file",
+)
+def export_transcript_pdf(
+    meeting_id: int, db: DbSession, current_user: CurrentUser
+) -> Response:
+    """Render the transcript as a PDF.
+
+    WHY A PDF AS WELL AS PLAIN TEXT
+    -------------------------------
+    The .txt export remains the accessible default: every screen reader handles
+    it with no extra dependency. A PDF is what gets attached to an email or
+    handed in as a record, and it is what people actually ask for.
+
+    Generated on the SERVER rather than in the browser, for two reasons. The
+    access check (`_load_meeting_for_member`) already lives here and must not be
+    duplicated on the client where it could be bypassed; and the header block is
+    shared with the .txt path, so the two formats cannot disagree about what a
+    transcript contains.
+    """
+    # Imported lazily. reportlab is only needed by this one endpoint, and a
+    # deployment that never exports a PDF should not pay the import cost at
+    # startup — the same pattern used for TensorFlow and faster-whisper.
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+    from reportlab.pdfgen import canvas as pdf_canvas
+
+    meeting = _load_meeting_for_member(db, meeting_id, current_user)
+    rows = _transcript_rows(db, meeting_id)
+
+    buffer = io.BytesIO()
+    pdf = pdf_canvas.Canvas(buffer, pagesize=A4)
+    width, height = A4
+
+    left = 18 * mm
+    right_limit = width - 18 * mm
+    y = height - 20 * mm
+    line_height = 5.2 * mm
+
+    def new_page() -> float:
+        pdf.showPage()
+        return height - 20 * mm
+
+    # --- title -------------------------------------------------------------
+    pdf.setFont("Helvetica-Bold", 15)
+    pdf.drawString(left, y, "BridgeTalk meeting transcript")
+    y -= line_height * 1.6
+
+    pdf.setFont("Helvetica", 9.5)
+    for label, value in _transcript_header(meeting, len(rows)):
+        pdf.drawString(left, y, f"{label}:")
+        pdf.drawString(left + 24 * mm, y, str(value))
+        y -= line_height
+    y -= line_height * 0.6
+
+    pdf.setStrokeColorRGB(0.75, 0.75, 0.75)
+    pdf.line(left, y, right_limit, y)
+    y -= line_height * 1.2
+
+    # --- lines -------------------------------------------------------------
+    if not rows:
+        pdf.setFont("Helvetica-Oblique", 10)
+        pdf.drawString(left, y, "(no transcript lines were recorded for this meeting)")
+    else:
+        for row in rows:
+            if y < 22 * mm:
+                y = new_page()
+
+            timestamp = row.created_at.strftime("%H:%M:%S")
+            tag = "SIGN" if row.source.value == "sign" else "SPEECH"
+            confidence = f" ({row.confidence:.0%})" if row.confidence is not None else ""
+
+            pdf.setFont("Helvetica-Bold", 8.5)
+            pdf.drawString(left, y, f"[{timestamp}] {tag}")
+            pdf.setFont("Helvetica", 9.5)
+            pdf.drawString(left + 30 * mm, y, f"{row.user.name}:{confidence}")
+            y -= line_height * 0.9
+
+            # Wrap the content by measuring the actual rendered width, rather
+            # than guessing a character count — proportional fonts make a
+            # fixed-width guess wrong in both directions.
+            pdf.setFont("Helvetica", 10.5)
+            usable = right_limit - (left + 6 * mm)
+            words = row.content.split()
+            current = ""
+            for word in words:
+                candidate = f"{current} {word}".strip()
+                if pdf.stringWidth(candidate, "Helvetica", 10.5) <= usable:
+                    current = candidate
+                    continue
+                pdf.drawString(left + 6 * mm, y, current)
+                y -= line_height
+                if y < 22 * mm:
+                    y = new_page()
+                current = word
+            if current:
+                pdf.drawString(left + 6 * mm, y, current)
+            y -= line_height * 1.3
+
+    pdf.save()
+
+    filename = f"bridgetalk-transcript-{meeting.code}.pdf"
+    return Response(
+        content=buffer.getvalue(),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @router.get(
     "/{meeting_id}/export",
     response_class=PlainTextResponse,
@@ -140,25 +277,13 @@ def export_transcript(
     accessibility project.
     """
     meeting = _load_meeting_for_member(db, meeting_id, current_user)
+    rows = _transcript_rows(db, meeting_id)
 
-    rows = db.scalars(
-        select(Transcript)
-        .where(Transcript.meeting_id == meeting_id)
-        .options(selectinload(Transcript.user))
-        .order_by(Transcript.created_at.asc(), Transcript.id.asc())
-    ).all()
-
-    lines = [
-        "BridgeTalk meeting transcript",
-        "=" * 60,
-        f"Meeting:  {meeting.title}",
-        f"Code:     {meeting.code}",
-        f"Started:  {meeting.started_at.isoformat() if meeting.started_at else 'not started'}",
-        f"Ended:    {meeting.ended_at.isoformat() if meeting.ended_at else 'still active'}",
-        f"Lines:    {len(rows)}",
-        "=" * 60,
-        "",
-    ]
+    lines = ["BridgeTalk meeting transcript", "=" * 60]
+    # Same header builder the PDF uses, so the two formats cannot disagree
+    # about what a transcript header contains.
+    lines += [f"{label + ':':<9} {value}" for label, value in _transcript_header(meeting, len(rows))]
+    lines += ["=" * 60, ""]
 
     if not rows:
         lines.append("(no transcript lines were recorded for this meeting)")

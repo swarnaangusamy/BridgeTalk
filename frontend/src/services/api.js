@@ -160,11 +160,18 @@ export const transcripts = {
    * present, so the name stays owned by whoever generates the file rather than
    * being duplicated — and drifting — on both sides.
    */
-  download: async (meetingId) => {
+  /**
+   * Download the transcript. `format` is 'txt' or 'pdf'.
+   *
+   * Both go through the same authenticated-fetch-to-Blob path, because both
+   * endpoints are member-only and a plain <a href> cannot carry the token.
+   */
+  download: async (meetingId, format = 'txt') => {
     const token = getToken();
 
+    const suffix = format === 'pdf' ? '/export.pdf' : '/export';
     const response = await fetch(
-      `${API_BASE_URL}/api/transcripts/${meetingId}/export`,
+      `${API_BASE_URL}/api/transcripts/${meetingId}${suffix}`,
       { headers: token ? { Authorization: `Bearer ${token}` } : {} },
     );
 
@@ -180,7 +187,7 @@ export const transcripts = {
 
     const disposition = response.headers.get('Content-Disposition') ?? '';
     const match = disposition.match(/filename="?([^"]+)"?/);
-    const filename = match ? match[1] : `bridgetalk-transcript-${meetingId}.txt`;
+    const filename = match ? match[1] : `bridgetalk-transcript-${meetingId}.${format}`;
 
     const blob = await response.blob();
     const objectUrl = URL.createObjectURL(blob);

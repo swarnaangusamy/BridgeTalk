@@ -19,7 +19,8 @@ import { transcripts as transcriptsApi } from '../services/api';
  */
 export default function TranscriptDownloadButton({
   meetingId,
-  label = 'Download .txt',
+  format = 'txt',
+  label = `Download .${format}`,
   className = 'rounded-md border border-ink-700 px-2 py-1 text-xs hover:bg-ink-700 disabled:opacity-50',
 }) {
   // 'idle' | 'working' | 'done' | 'error'
@@ -32,7 +33,7 @@ export default function TranscriptDownloadButton({
     setState('working');
     setError(null);
     try {
-      await transcriptsApi.download(meetingId);
+      await transcriptsApi.download(meetingId, format);
       setState('done');
       // Return to the neutral label shortly. A button stuck on "Saved" reads
       // as though clicking it again would do nothing.
@@ -41,7 +42,7 @@ export default function TranscriptDownloadButton({
       setState('error');
       setError(cause.message ?? 'Download failed');
     }
-  }, [meetingId]);
+  }, [meetingId, format]);
 
   if (!meetingId) return null;
 

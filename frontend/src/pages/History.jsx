@@ -62,7 +62,16 @@ export default function History() {
         {rows?.map((meeting) => (
           <li key={meeting.id} className="panel flex flex-wrap items-center justify-between gap-3">
             <div>
-              <h2 className="font-semibold text-slate-100">{meeting.title}</h2>
+              <h2 className="font-semibold text-slate-100">
+                {/* The title is the link, so the whole row does not become one
+                    big click target that swallows the buttons beside it. */}
+                <Link
+                  to={`/history/${encodeURIComponent(meeting.code)}`}
+                  className="hover:text-bridge-400 hover:underline"
+                >
+                  {meeting.title}
+                </Link>
+              </h2>
               <p className="text-sm text-slate-400">
                 <span className="font-mono">{meeting.code}</span>
                 {' · hosted by '}

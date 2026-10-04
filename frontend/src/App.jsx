@@ -5,6 +5,7 @@ import { AuthProvider, useAuth } from './context/AuthContext';
 import Dashboard from './pages/Dashboard';
 import History from './pages/History';
 import Login from './pages/Login';
+import MeetingDetail from './pages/MeetingDetail';
 import MeetingRoom from './pages/MeetingRoom';
 import SignDetection from './pages/SignDetection';
 
@@ -47,6 +48,7 @@ export default function App() {
 
           <Route path="/" element={<RequireAuth><Dashboard /></RequireAuth>} />
           <Route path="/history" element={<RequireAuth><History /></RequireAuth>} />
+          <Route path="/history/:code" element={<RequireAuth><MeetingDetail /></RequireAuth>} />
           <Route path="/meeting/:code" element={<RequireAuth><MeetingRoom /></RequireAuth>} />
           {/* The standalone sign-detection screen from Phase 5. It stays
               because it is the quickest way to check the model is working
