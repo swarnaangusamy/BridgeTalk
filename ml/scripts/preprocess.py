@@ -324,6 +324,17 @@ def main() -> int:
         "smallest, so no class dominates. 'none' keeps everything.",
     )
     parser.add_argument(
+        "--split-by-pose", action="store_true",
+        help="Hold out whole near-duplicate pose clusters. Use for datasets "
+             "with scattered duplicates (the ISL image set) where an "
+             "index-based split leaks copies across the boundary.",
+    )
+    parser.add_argument(
+        "--pose-threshold", type=float, default=0.5,
+        help="Distance below which two landmark vectors are the same pose. "
+             "Two DIFFERENT ISL signs sit ~4.0 apart, so 0.5 is tight.",
+    )
+    parser.add_argument(
         "--dataset",
         choices=["asl", "isl"],
         default="asl",
@@ -361,7 +372,14 @@ def main() -> int:
     rng = np.random.default_rng(args.seed)
 
     print(f"Reading {args.input.relative_to(REPO_ROOT)}")
-    frame = pd.read_csv(args.input)
+    # `label` is read as a string explicitly. Without this, pandas infers the
+    # column's type per chunk, so an alphabet containing digit classes — ISL
+    # has 1-9 alongside A-Z — comes back with some labels as int and some as
+    # str. Everything downstream then breaks in confusing ways: sorting raises
+    # TypeError comparing str to int, and the label-to-index map would key
+    # 1 and "1" separately. ASL never hit this because none of its class names
+    # look numeric.
+    frame = pd.read_csv(args.input, dtype={"label": str})
     print(f"  {len(frame):,} rows, {len(frame.columns)} columns")
 
     feature_columns = [f"f{i}" for i in range(expected_features)]
@@ -434,13 +452,98 @@ def main() -> int:
     }
 
     # --- split ---------------------------------------------------------------
-    split_mode = "random (INFLATES accuracy)" if args.random_split else "contiguous by capture order"
+    def pose_clusters(subset: pd.DataFrame, threshold: float) -> np.ndarray:
+        """Group near-identical landmark vectors into pose clusters.
+
+        WHY THIS IS NEEDED
+        ------------------
+        Contiguous-by-capture-order splitting assumes neighbouring frames are
+        similar and distant frames are not. That holds for ASL Alphabet, whose
+        images are consecutive video frames.
+
+        It does NOT hold for the ISL image set, which contains many
+        near-identical copies of a small number of real hand poses, scattered
+        throughout the folder rather than adjacent. Measured on this dataset:
+        41,609 images collapse to 1,159 distinct poses (2.8%), and some classes
+        have a single pose across 1,200 images.
+
+        With duplicates scattered, ANY index-based split puts copies of the same
+        pose on both sides. The result is a model tested on images it has
+        effectively already seen: 99.75% top-1, and a median nearest-neighbour
+        distance from test to train of 0.10 when two different signs sit 4.0
+        apart. That number measures duplication, not recognition.
+
+        Greedy single-pass clustering is enough here and is O(n x clusters)
+        rather than O(n^2): with ~33 clusters per class the inner comparison is
+        tiny, and the clusters are far apart relative to the threshold so the
+        order rows arrive in does not change the grouping meaningfully.
+        """
+        values = subset[feature_columns].to_numpy(dtype=np.float32)
+        centres: list[np.ndarray] = []
+        assignment = np.empty(len(values), dtype=np.int32)
+
+        for row_index, vector in enumerate(values):
+            if centres:
+                distances = np.sqrt(((np.asarray(centres) - vector) ** 2).sum(axis=1))
+                nearest = int(distances.argmin())
+                if distances[nearest] <= threshold:
+                    assignment[row_index] = nearest
+                    continue
+            centres.append(vector)
+            assignment[row_index] = len(centres) - 1
+
+        return assignment
+
+    split_mode = (
+        "random (INFLATES accuracy)" if args.random_split
+        else "pose-disjoint (whole near-duplicate clusters held out)" if args.split_by_pose
+        else "contiguous by capture order"
+    )
     print(f"\nSplitting 70/15/15 — {split_mode}")
 
     train_parts, val_parts, test_parts = [], [], []
+    # Classes whose every image is one pose — they cannot contribute a
+    # held-out sample, and that must be reported rather than hidden.
+    unsplittable: list[tuple[str, int, int]] = []
 
     for label in labels_sorted:
         subset = frame[frame["label"] == label].copy()
+
+        if args.split_by_pose:
+            # Hold out whole pose clusters, so no copy of a test pose can
+            # appear in training. Clusters are assigned, not rows.
+            subset = subset.copy()
+            subset["_cluster"] = pose_clusters(subset, args.pose_threshold)
+
+            cluster_ids = subset["_cluster"].unique()
+            # Shuffle cluster IDS (not rows) so which poses are held out does
+            # not depend on folder order, while keeping each cluster intact.
+            rng.shuffle(cluster_ids)
+
+            n_clusters = len(cluster_ids)
+            if n_clusters < 3:
+                # Nothing can be held out: every image of this class is the
+                # same pose. Keep it in training so the class still exists in
+                # the label space, and record it — a class that cannot appear
+                # in the test set must not be silently counted as evaluated.
+                unsplittable.append((label, n_clusters, len(subset)))
+                train_parts.append(subset.drop(columns="_cluster"))
+                continue
+
+            train_cut = max(1, int(n_clusters * TRAIN_FRACTION))
+            val_cut = max(train_cut + 1, int(n_clusters * (TRAIN_FRACTION + VAL_FRACTION)))
+            val_cut = min(val_cut, n_clusters - 1)
+
+            groups = {
+                "train": set(cluster_ids[:train_cut]),
+                "val": set(cluster_ids[train_cut:val_cut]),
+                "test": set(cluster_ids[val_cut:]),
+            }
+            for name, parts in (("train", train_parts), ("val", val_parts), ("test", test_parts)):
+                rows = subset[subset["_cluster"].isin(groups[name])]
+                if len(rows):
+                    parts.append(rows.drop(columns="_cluster"))
+            continue
 
         if args.random_split:
             subset = subset.sample(frac=1.0, random_state=args.seed)
@@ -456,6 +559,14 @@ def main() -> int:
         train_parts.append(subset.iloc[:train_end])
         val_parts.append(subset.iloc[train_end:val_end])
         test_parts.append(subset.iloc[val_end:])
+
+    if unsplittable:
+        print(f"\n  WARNING — {len(unsplittable)} class(es) have fewer than 3 distinct")
+        print("  poses, so nothing can be held out for them. They stay in TRAINING")
+        print("  and are absent from val/test. The reported accuracy therefore does")
+        print("  not cover them:")
+        for label, clusters, rows in unsplittable:
+            print(f"    '{label}': {clusters} pose(s) across {rows:,} images")
 
     def to_arrays(parts: list[pd.DataFrame]) -> tuple[np.ndarray, np.ndarray]:
         combined = pd.concat(parts)
@@ -568,7 +679,16 @@ def main() -> int:
         "dropped_classes": dropped_report,
         "class_balancing": balance_report,
         "split": {
-            "mode": "random" if args.random_split else "contiguous_by_capture_order",
+            "mode": (
+                "random" if args.random_split
+                else "pose_disjoint" if args.split_by_pose
+                else "contiguous_by_capture_order"
+            ),
+            "pose_threshold": args.pose_threshold if args.split_by_pose else None,
+            "classes_with_no_held_out_poses": [
+                {"label": label, "distinct_poses": clusters, "images": rows}
+                for label, clusters, rows in unsplittable
+            ],
             "rationale": (
                 "ASL Alphabet frames are consecutive video frames, so a random "
                 "split leaks near-duplicate images across train and test and "
