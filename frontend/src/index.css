@@ -3,33 +3,114 @@
 @tailwind utilities;
 
 @layer base {
+  /* The meeting room must not scroll — the stage, caption area and control
+     bar are sized to the viewport. Pages outside the meeting DO scroll, so
+     this is applied by the meeting room itself (see `.no-scroll`) rather than
+     globally. */
   html {
-    /* Respect the OS-level "reduce motion" setting rather than overriding it. */
-    scroll-behavior: smooth;
+    -webkit-text-size-adjust: 100%;
   }
 
   body {
-    @apply bg-ink-900 text-slate-100 antialiased;
-    font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto,
-      'Helvetica Neue', Arial, sans-serif;
+    @apply bg-light-bg font-sans text-light-text antialiased;
+    margin: 0;
   }
 
-  /* A visible focus ring is a hard accessibility requirement here: the whole
-     UI must be operable from the keyboard, and the default browser outline
-     disappears against our dark surfaces. */
+  /* A visible focus ring is a hard requirement: the specification asks for
+     everything to be reachable by keyboard with a visible ring, and the
+     default browser outline disappears against both of our surfaces. Two
+     variants, because one colour cannot work on white and on #202124. */
   :focus-visible {
-    @apply outline-none ring-2 ring-bridge-400 ring-offset-2 ring-offset-ink-900;
+    @apply outline-none ring-2 ring-light-blue ring-offset-2 ring-offset-light-bg;
+  }
+
+  .on-dark :focus-visible,
+  .on-dark:focus-visible {
+    @apply ring-dark-accent ring-offset-dark-bg;
+  }
+
+  /* Honour the OS "reduce motion" setting. Panels and toasts slide; a user who
+     has asked for less motion gets the same states with no animation. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
   }
 }
 
 @layer components {
-  .btn-primary {
-    @apply rounded-lg bg-bridge-500 px-4 py-2 font-semibold text-ink-900
-           transition-colors hover:bg-bridge-400 disabled:opacity-50
-           disabled:cursor-not-allowed;
+  /* ---------------------------------------------------------------------- */
+  /* Material Symbols                                                        */
+  /* ---------------------------------------------------------------------- */
+  /* The icons are ligatures: the element's TEXT is the icon name. The font
+     turns "mic" into the microphone glyph. `font-variation-settings` is what
+     selects the outlined weight and optical size. */
+  .material-symbols-outlined {
+    font-family: 'Material Symbols Outlined';
+    font-weight: normal;
+    font-style: normal;
+    line-height: 1;
+    letter-spacing: normal;
+    text-transform: none;
+    display: inline-block;
+    white-space: nowrap;
+    word-wrap: normal;
+    direction: ltr;
+    -webkit-font-feature-settings: 'liga';
+    font-feature-settings: 'liga';
+    -webkit-font-smoothing: antialiased;
+    font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+    user-select: none;
   }
 
-  .panel {
-    @apply rounded-xl border border-ink-700 bg-ink-800 p-6;
+  .material-symbols-outlined.filled {
+    font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* Buttons — pill shaped, 40–48px high, per the specification              */
+  /* ---------------------------------------------------------------------- */
+  .btn {
+    @apply inline-flex h-10 select-none items-center justify-center gap-2
+           rounded-full px-6 text-sm font-medium transition-colors
+           disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .btn-primary {
+    @apply btn bg-light-blue text-white hover:bg-light-bluehover;
+  }
+
+  .btn-outlined {
+    @apply btn border border-light-border bg-transparent text-light-blue
+           hover:bg-light-blue/[.04];
+  }
+
+  .btn-text {
+    @apply btn px-3 text-light-blue hover:bg-light-blue/[.04];
+  }
+
+  .btn-danger {
+    @apply btn bg-light-danger text-white hover:brightness-110;
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* Surfaces                                                               */
+  /* ---------------------------------------------------------------------- */
+  .card {
+    @apply rounded-card border border-light-border bg-light-bg;
+  }
+
+  .no-scroll {
+    @apply h-screen overflow-hidden;
+  }
+
+  /* Used by the transcript search to mark matches without losing contrast. */
+  .search-hit {
+    @apply rounded-sm bg-yellow-200 px-0.5 text-light-text;
   }
 }
