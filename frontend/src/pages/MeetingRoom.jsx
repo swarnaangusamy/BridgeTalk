@@ -4,12 +4,14 @@ import { useNavigate, useParams } from 'react-router-dom';
 import HandOverlayCanvas from '../components/HandOverlayCanvas';
 import ModeSwitch from '../components/ModeSwitch';
 import SignDetectionPanel from '../components/SignDetectionPanel';
+import InterviewModeDialog from '../components/InterviewModeDialog';
+import InterviewModeOverlay from '../components/InterviewModeOverlay';
 import SpeechControls from '../components/SpeechControls';
 import SubtitleBar from '../components/SubtitleBar';
 import TranscriptPanel from '../components/TranscriptPanel';
 import VideoTile from '../components/VideoTile';
 import { useAuth } from '../context/AuthContext';
-import { useFocusMonitor } from '../hooks/useFocusMonitor';
+import { useInterviewMode } from '../hooks/useInterviewMode';
 import { useHandLandmarker } from '../hooks/useHandLandmarker';
 import { useSignSocket } from '../hooks/useSignSocket';
 import { useSpeechToText } from '../hooks/useSpeechToText';
@@ -32,7 +34,11 @@ import { toWireFormat } from '../utils/landmarkUtils';
  * fail outright because the device is already open.
  */
 
-const SEND_INTERVAL_MS = 100; // 10 FPS to the inference socket
+const SEND_INTERVAL_MS = 100;
+
+// Violations before the host is prompted to remove the participant.
+// Configurable here rather than scattered through the UI.
+const MAX_VIOLATIONS = 3; // 10 FPS to the inference socket
 
 export default function MeetingRoom() {
   const { code } = useParams();
@@ -347,23 +353,66 @@ export default function MeetingRoom() {
   // again here would race it. Kept as a single source of truth deliberately.
 
   // --- Interview Mode ------------------------------------------------------
-  // Enabled per meeting, chosen by the host at creation time. Each focus
-  // change is posted to the backend so the record survives a page reload —
-  // a tab switch the participant then refreshes away should still be there.
-  const handleFocusEvent = useCallback(
-    (eventType) => {
-      if (!meeting?.is_interview_mode) return;
-      meetingsApi.logFocusEvent(code, eventType).catch(() => {
+  // The mode lives on the MEETING RECORD, not in local state, so a participant
+  // who reloads or reconnects arrives already subject to it. Reloading must not
+  // be a way out.
+  const isHost = Boolean(meeting?.host?.id && user?.id && meeting.host.id === user.id);
+  const interviewOn = Boolean(meeting?.is_interview_mode);
+
+  // Each focus change is posted to the backend so the record survives a page
+  // reload — a tab switch the participant then refreshes away should still be
+  // in the host's log.
+  const handleViolation = useCallback(
+    ({ type, durationMs }) => {
+      if (!interviewOn) return;
+      meetingsApi.logFocusEvent(code, type, durationMs).catch(() => {
         // Best effort. A failed log must never interrupt the meeting itself.
       });
     },
-    [code, meeting],
+    [code, interviewOn],
   );
 
-  const focus = useFocusMonitor({
-    enabled: Boolean(meeting?.is_interview_mode),
-    onEvent: handleFocusEvent,
+  const interview = useInterviewMode({
+    enabled: interviewOn,
+    isHost,
+    onViolation: handleViolation,
+    maxViolations: MAX_VIOLATIONS,
   });
+
+  // The host's live view of who has left and how often.
+  const [violationLog, setViolationLog] = useState([]);
+
+  const refreshViolations = useCallback(() => {
+    if (!isHost || !interviewOn) return;
+    meetingsApi
+      .focusEvents(code)
+      .then((summary) => setViolationLog(summary.by_participant ?? []))
+      .catch(() => {
+        /* the host's panel is informational; a failure must not break the call */
+      });
+  }, [code, interviewOn, isHost]);
+
+  // Polled rather than pushed. The violation feed is a host-only side panel,
+  // and adding a third message type to the inference socket to carry it would
+  // couple attention logging to sign recognition — a failure in one would then
+  // take down the other. Five seconds is well inside human reaction time for
+  // something the host acts on by talking to the candidate.
+  useEffect(() => {
+    if (!isHost || !interviewOn) return undefined;
+    refreshViolations();
+    const timer = setInterval(refreshViolations, 5000);
+    return () => clearInterval(timer);
+  }, [isHost, interviewOn, refreshViolations]);
+
+  const toggleInterviewMode = useCallback(async () => {
+    if (!isHost) return;
+    try {
+      const updated = await meetingsApi.setInterviewMode(code, !interviewOn);
+      setMeeting(updated);
+    } catch (cause) {
+      setCameraError(cause.message ?? 'Could not change interview mode');
+    }
+  }, [code, interviewOn, isHost]);
 
   // --- the call ------------------------------------------------------------
   const { remoteStream, connectionState, peer, error: rtcError, hangUp } = useWebRTC({
@@ -422,6 +471,28 @@ export default function MeetingRoom() {
 
   return (
     <main className="mx-auto flex min-h-screen max-w-7xl flex-col gap-4 p-4">
+      {/* The dialog blocks the meeting until acknowledged. Its button is also
+          the user gesture the browser requires before fullscreen is allowed —
+          which is why enforcement starts on the click, not on mount. */}
+      {interviewOn && !isHost && !interview.acknowledged && (
+        <InterviewModeDialog
+          hostName={meeting?.host?.name}
+          capabilities={interview.capabilities}
+          onAcknowledge={interview.acknowledge}
+        />
+      )}
+
+      {/* Covers the meeting while they are away or out of fullscreen, so
+          leaving costs them the view rather than being free. */}
+      {interview.mustBlock && (
+        <InterviewModeOverlay
+          awayCount={interview.awayCount}
+          maxViolations={MAX_VIOLATIONS}
+          isFullscreen={interview.isFullscreen}
+          onReturn={interview.reEnterFullscreen}
+        />
+      )}
+
       <header className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">
@@ -513,9 +584,15 @@ export default function MeetingRoom() {
         {/* --- right column ---------------------------------------------- */}
         <aside className="flex flex-col gap-4">
           <ModeSwitch
-            enabled={Boolean(meeting?.is_interview_mode)}
-            awayCount={focus.awayCount}
-            isAway={focus.isAway}
+            enabled={interviewOn}
+            isHost={isHost}
+            awayCount={interview.awayCount}
+            isAway={interview.isAway}
+            capabilities={interview.capabilities}
+            keyboardLocked={interview.keyboardLocked}
+            violationLog={violationLog}
+            maxViolations={MAX_VIOLATIONS}
+            onToggle={toggleInterviewMode}
           />
 
           <SignDetectionPanel

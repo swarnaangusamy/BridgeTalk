@@ -118,12 +118,19 @@ export const meetings = {
   leave: (code) => request(`/api/meetings/${encodeURIComponent(code)}/leave`, { method: 'POST' }),
   end: (code) => request(`/api/meetings/${encodeURIComponent(code)}/end`, { method: 'POST' }),
   history: () => request('/api/meetings/history'),
-  logFocusEvent: (code, eventType) =>
+  logFocusEvent: (code, eventType, durationMs = null) =>
     request(`/api/meetings/${encodeURIComponent(code)}/focus-events`, {
       method: 'POST',
-      body: { event_type: eventType },
+      body: { event_type: eventType, duration_away_ms: durationMs },
     }),
   focusEvents: (code) => request(`/api/meetings/${encodeURIComponent(code)}/focus-events`),
+
+  /** Host-only: switch Interview Mode on or off during a meeting. */
+  setInterviewMode: (code, enabled) =>
+    request(`/api/meetings/${encodeURIComponent(code)}/interview-mode`, {
+      method: 'PATCH',
+      body: { enabled },
+    }),
 };
 
 // --- transcripts -----------------------------------------------------------
