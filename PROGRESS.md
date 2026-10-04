@@ -69,98 +69,88 @@ dry/wet). The **static** ISL model will use 126 exactly as specified.
 
 ## Status table — Section 4 definition of done
 
-| # | Feature | Status | Detail |
-|---|---|---|---|
-| 1 | Register and log in | **Working** | `/api/auth/register`, `/login/json`; both demo accounts return HTTP 200 |
-| 2 | Home: new meeting, join by code, past meetings | **Working** | `Dashboard.jsx` creates + joins; `History.jsx` lists |
-| 3 | Pre-join lobby: camera/mic preview + device selection | **Missing** | no `enumerateDevices` anywhere in `frontend/src` |
-| 4 | Both participants see and hear each other | **Working** | `useWebRTC.js`, signalling over `/ws/signal/{code}` |
-| 5 | Signing produces live captions, continuously, no button | **Working** | ISL word model, 17.5% WER continuous; `__transition__` class handles boundaries |
-| 6 | Speaking produces live captions | **Working** | Web Speech `en-IN` primary; Whisper fallback loaded and verified |
-| 7 | Captions labelled by speaker + source, seen by both | **Working** | `SubtitleBar.jsx` 🤟/🎤 badges; broadcast over `/ws/predict` |
-| 8 | Transcript saved to MySQL on meeting end | **Working** | rows confirmed in live DB |
-| 9 | History shows meeting, opening it shows full transcript | **Partial** | list only. **No detail view, no transcript page, no search.** TXT download works |
-| 10 | Interview mode: notify, hold fullscreen, block, report, log | **Partial** | detection + DB logging only. **No** host toggle mid-meeting, blocking dialog, fullscreen, Keyboard Lock, overlay, host alert, violation count, removal, or duration-away |
+Verified by running, as of the Phase 3a/6/7/8/9/10 work.
 
-### Supporting items
+| # | Feature | Status | Evidence |
+|---|---|---|---|
+| 1 | Register and log in | **Working** | both demo accounts HTTP 200 |
+| 2 | Home: new meeting, join by code, history | **Working** | `Dashboard.jsx`; join now routes via the lobby |
+| 3 | Pre-join lobby, camera preview, device selection | **Working** | `Lobby.jsx` + `useMediaDevices.js`; choices applied with `exact` and carried into the room |
+| 4 | Both see and hear each other | **Working** | `useWebRTC.js`, `/ws/signal/{code}`; ICE from env |
+| 5 | Signing → live captions, continuous | **Working** | 17.5% WER continuous |
+| 6 | Speaking → live captions | **Working** | Web Speech `en-IN`; Whisper verified at 1,134 ms |
+| 7 | Captions labelled, both see them | **Working** | 🤟/🎤 badges, broadcast over `/ws/predict` |
+| 8 | Transcript saved to MySQL | **Working** | rows confirmed in the live database |
+| 9 | History → open → full transcript | **Working** | `/history/:code` with search, participants, duration, TXT + PDF |
+| 10 | Interview mode: notify, fullscreen, block, report, log | **Working** | toggle, dialog, Keyboard Lock, overlay, host log; verified live: 42s absence round-tripped |
+
+### Supporting
 
 | Item | Status | Detail |
 |---|---|---|
-| Automated tests | **Working** | 220 pass, 2 skipped |
-| `/health` endpoint | **Working** | reports DB + all 4 model slots |
-| `.env` / `.env.example` / `.gitignore` | **Working** | covers `.env`, `node_modules`, `.venv`, `dist`, `ml/data/raw`, `__pycache__` |
-| Models load once at startup | **Working** | 4 `.load()` calls in `main.py` lifespan |
-| CORS from env | **Working** | `cors_origins` in `config.py` |
-| STUN/TURN from env | **Partial** | **hardcoded** Google STUN in `useWebRTC.js:32`; spec requires env vars |
-| `docker-compose.yml` | **Partial** | **MySQL only.** No backend/frontend services |
-| `Dockerfile` (backend, frontend) | **Missing** | none exist |
-| PDF transcript export | **Missing** | only the word "PDF" in a comment explaining why TXT was chosen |
-| Meeting timer, copy-link, caption-size control | **Missing** | no matches in `MeetingRoom.jsx` or components |
-| `PROGRESS.md` | **Working** | this file |
+| Tests | **Working** | 231 pass, 2 skipped |
+| Live inference path parity | **Working** | `test_inference_path.py` agrees with `evaluate.py` exactly on all three models |
+| ICE servers from env | **Working** | `VITE_STUN_URLS`, `VITE_TURN_*` |
+| Migrations | **Working** | `database/migrations/001_*.sql`, idempotent, applied and verified |
+| PDF + TXT export | **Working** | server-side, shared header builder |
+| Meeting timer, copy-link, caption size | **Working** | caption size reaches `SubtitleBar` |
+| Dockerfiles + full compose | **Partial** | written and statically validated; **Docker is not installed here, so never built or run** |
+| README | **Working** | measured numbers, licences, limits |
 
 ---
 
-## Phase 0 blocker: the specified dataset does not exist
+## Measured accuracy — held-out splits only
 
-The brief names `eraakash/indian-sign-language-hand-landmarks-dataset` on
-Hugging Face as the training dataset. **It does not exist.** Verified:
+| Model | Measured | Split | Notes |
+|---|---|---|---|
+| ISL words (BiLSTM, `(30,132)`, 40 classes) | **85.23%** top-1, 94.63% top-3; **17.5% WER** continuous | random | INCLUDE records no signer id, so `signer_disjoint: false` |
+| ISL fingerspelling (MLP, `(126,)`, 35 classes) | **92.04% macro recall** over 28 judgeable classes | **pose-disjoint** | weighted top-1 is 98.14% but inflated; 7 classes unjudgeable; H and J at 0% |
+| ASL fingerspelling (MLP, `(63,)`, 28 classes) | 90.53% top-1, 96.91% top-3 | contiguous | baseline only |
 
-- `GET /api/datasets/eraakash/indian-sign-language-hand-landmarks-dataset`
-  → `Invalid username or password` (private, gated, or absent)
-- `GET /api/datasets?author=eraakash` → **0 datasets**
-- The network and the HF API both work — a public control dataset resolved fine
-
-So the ISL fingerspelling model still has no specified source. Searched HF and
-evaluated every ISL candidate:
-
-| Dataset | Contents | Verdict |
-|---|---|---|
-| `LIGHTscrn/Indian-Sign-language-landmarks-30frames` | **only `.gitattributes`** — empty repo | unusable |
-| `ajeet-123/Indian_Sign_Language` | README only, no data | unusable |
-| `KRISH09bha/Hindi-Indian-Sign-language-dataset-ISL` | README only, no data | unusable |
-| **`Hemg/Indian_sign_language_dataset`** | **42,745 images, 35 classes** (1–9, A–Z), 259 MB | **chosen** |
-| `akritRihal/Indian_Sign_Language_dataset` | 9,139 train + 1,613 test, 33 classes, 578 MB | backup |
-
-**Decision: use `Hemg/Indian_sign_language_dataset`.** Reasons: most images per
-class (~1,221), smallest download, and 35 classes matches ISL fingerspelling
-(9 digits + 26 letters). It is images, not landmarks — which is fine, because
-`extract_landmarks_images.py --dataset isl` already converts images to
-two-handed 126-feature vectors and that path is covered by 11 tests.
-
-**Honest caveat:** neither usable dataset declares a licence. They are publicly
-downloadable, which satisfies the dataset-only rule, but "no licence stated"
-must be recorded in the README rather than implying permissive terms.
-
----
-
-## Ordered plan
-
-1. **Phase 1** — ICE servers to env vars (the one real Phase 1 gap).
-2. **Phase 3a** — download `Hemg`, extract 126-feature landmarks, train and
-   evaluate the **ISL fingerspelling model**. This completes the two-model
-   design and is the largest single gap.
-3. **Phase 3b** — movement-based arbitration between static and dynamic models.
-4. **Phase 6** — history detail page: transcript view, search, PDF export.
-5. **Phase 7** — interview mode in full: toggle, dialog, fullscreen, Keyboard
-   Lock, overlay, host alerts, violation count, `duration_away` migration.
-6. **Phase 8** — lobby with device selection; timer, copy-link, caption size.
-7. **Phase 9** — tests for the new surfaces; held-out inference-path script.
-8. **Phase 10** — Dockerfiles, compose with all three services, README.
-
-Phases 2, 4 and 5 are already **Working** and will be left alone.
+Live-path latency: ASL 0.70 ms, ISL 0.71 ms, words 6.12 ms median.
 
 ---
 
 ## Decisions made, and why
 
-- **Dynamic model keeps 132 features**, not 126. Position was worth 5 points of
-  accuracy and removed the movement-pair confusions. Static ISL uses 126.
-- **Vocabulary capped at 40 words.** Measured: 20 → 84.81%, 40 → **89.93%**,
-  70 → 78.99%. INCLUDE's clip counts fall off a cliff after ~48 words, so thin
-  classes dilute the model. Current 85.23% is after adding the boundary class.
-- **Inference is a compiled `tf.function`**, not eager and not `.predict()`.
-  Masking around an LSTM forces a per-timestep path: 1,373 ms eager → 18 ms
-  compiled. Correct predictions arriving a second late are unusable.
-- **`signer_disjoint: false` everywhere.** INCLUDE records no signer identity,
-  so the test split holds out *clips*, not *people*. No number here claims
-  signer independence.
+- **Dataset substitution.** The brief named
+  `eraakash/indian-sign-language-hand-landmarks-dataset`; it does not exist
+  (0 datasets under that author, control dataset resolved fine). Three other
+  ISL candidates on HF contain no data at all. Used
+  `Hemg/Indian_sign_language_dataset` — 42,745 images, 35 classes. **No
+  licence declared**, recorded as a caveat.
+- **Pose-disjoint splitting for ISL fingerspelling.** 41,609 images collapse
+  to 1,159 distinct poses (2.8%), scattered rather than adjacent, so no
+  index-based split can separate copies. Without this the model reports 99.75%
+  and means nothing.
+- **Dynamic model keeps 132 features**, not the 126 the brief specifies.
+  With 126 the wrist sits at the origin every frame, so a still hand and a
+  sweeping hand are identical vectors. Position took top-1 from 79.75% to
+  84.81%. The **static** ISL model uses 126 exactly as specified.
+- **Vocabulary capped at 40.** Measured: 20 → 84.81%, 40 → 89.93%, 70 →
+  78.99%. INCLUDE's clip counts fall off a cliff after ~48 words.
+- **Inference is a compiled `tf.function`.** Masking around an LSTM forces a
+  per-timestep path: 1,373 ms eager → 18 ms compiled.
+- **Violation feed is polled, not pushed.** Adding a third message type to the
+  inference socket would couple attention logging to sign recognition, so a
+  failure in one would take the other down.
+- **Tailwind advisories not fixed.** `npm audit --omit=dev` reports zero; they
+  are dev-only. The only fix is a breaking Tailwind 4 migration.
+
+---
+
+## Known issues
+
+1. **Docker stack never run.** Docker is not installed on this machine. YAML
+   parses, all paths resolve, images unbuilt. The one genuinely unverified
+   deliverable.
+2. **No HTTPS.** Required for camera/mic/Web Speech from any device other than
+   localhost. Documented, not provided.
+3. **`useFocusMonitor.js` is now dead code**, superseded by
+   `useInterviewMode.js`. Left in place rather than deleted; safe to remove.
+4. **H and J fingerspelling at 0% recall**, and 7 letters unjudgeable — a
+   property of the source data, not the training.
+5. **Section 4 journey not walked in two browser windows.** Every layer below
+   the browser is verified; the two-window click-through needs a human.
+
+---

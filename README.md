@@ -1211,3 +1211,144 @@ Mapped to the SRS:
   WACV 2020. <https://arxiv.org/abs/1910.11006>
 - Sridhar, A. et al. *INCLUDE: A Large Scale Dataset for Indian Sign Language
   Recognition.* ACM Multimedia, 2020.
+
+---
+
+## Models and measured accuracy
+
+Every number here was measured on a held-out split and can be reproduced with
+the commands shown. Nothing is quoted from a training log.
+
+| Model | Input | Classes | Measured | Split |
+|---|---|---|---|---|
+| **ISL words** (BiLSTM) — the demo model | `(30, 132)` | 40 | **85.23%** top-1, 94.63% top-3 · **17.5% WER** continuous | random (see caveat) |
+| **ISL fingerspelling** (MLP) | `(126,)` | 35 | **92.04%** macro recall | pose-disjoint |
+| ASL fingerspelling (MLP) — baseline | `(63,)` | 28 | 90.53% top-1, 96.91% top-3 | contiguous by capture order |
+
+```bash
+python ml/scripts/evaluate.py --model ml/models/isl_model.keras \
+    --labels ml/models/labels_isl.json --prefix isl_ \
+    --report isl_evaluation_report.json --image-tag _isl
+
+# And through the path the browser actually uses, not the training arrays:
+python ml/scripts/test_inference_path.py
+```
+
+Both report the same figures. That agreement is the point: it says the serving
+path applies the same normalisation and feature layout as training did.
+
+### Read the ISL fingerspelling number carefully
+
+`evaluate.py` prints **98.14% top-1** for it. That figure is inflated by class
+size and should not be quoted. The honest headline is **92.04% macro
+recall over the 28 classes that actually have held-out samples**, because:
+
+- **7 classes cannot be judged at all** — `1, 2, 3, 4, 5, 8, L`. The source
+  data contains fewer than three distinct poses for each, so nothing could be
+  held out. They are in training and absent from the test set.
+- **Two classes score zero** — `H, J`. H fails on all 94 of its held-out
+  samples and J on all 11. Where a genuinely unseen pose exists, the model
+  frequently cannot generalise to it.
+
+### Why the split had to be pose-disjoint
+
+The first training run returned 100% train, 100% validation, loss 0.0000 and
+99.75% test. Perfect scores on 35 classes are a leakage signal, so we measured
+instead of reporting:
+
+- no *exact* duplicate feature vectors across splits
+- but median nearest-neighbour distance from a test row to the training set was
+  **0.1018**, while two random different-class rows sit **4.0178** apart — test
+  rows are 40× closer to a training row than two distinct signs are to each other
+- the nearest training neighbour shared the test row's label **100%** of the time
+
+The cause: clustering at a tight threshold collapses **41,609 images into 1,159
+distinct poses (2.8%)**. Several classes have one pose across 1,200 images.
+Because the duplicates are scattered through the folder rather than adjacent,
+contiguous-by-capture-order splitting cannot separate them — any index-based
+split puts copies of the same pose on both sides.
+
+`preprocess.py --split-by-pose` clusters near-duplicate vectors and assigns
+whole **clusters** to train/val/test, so nothing in test has a copy in training.
+
+### Datasets, and their licences
+
+| Model | Source | Licence |
+|---|---|---|
+| ISL words | INCLUDE — Sridhar et al., ACM MM 2020 | research use |
+| ISL fingerspelling | `Hemg/Indian_sign_language_dataset` (Hugging Face) | **none declared** |
+| ASL fingerspelling | `grassknoted/asl-alphabet` (Kaggle) | GPL-2 per its dataset page |
+
+All training data is from public datasets. No gestures were recorded for
+training — `test_realtime.py` and `record_eval_clip.py` use the webcam only to
+*evaluate* an already-trained model.
+
+The ISL fingerspelling dataset **declares no licence**. It is publicly
+downloadable, which is why it was used, but that is not the same as permissive
+terms and should not be presented as such.
+
+### Two limits that apply to every number above
+
+**No signer-independent measurement.** INCLUDE records no signer identity, so
+the word model's test split holds out *clips*, not *people*. Our code writes
+`signer_disjoint: false` everywhere so nothing overstates it. A new signer will
+score below these figures; that gap is the domain gap and is unmeasured.
+
+**Continuous signing is harder than isolated clips.** 85.23% is per-clip.
+Signing a sentence without pausing gives **17.5% word error rate** — roughly
+one word in six wrong. Measured with `ml/scripts/evaluate_continuous.py`.
+
+---
+
+## Interview mode: exactly what it can and cannot do
+
+A web page **cannot** prevent tab switching. There is no API for it, by design.
+What is implemented is the strongest layered version browsers permit, and the
+in-app dialog claims exactly this and no more.
+
+| Layer | Chrome / Edge | Firefox / Safari |
+|---|---|---|
+| Fullscreen on acknowledgement | ✅ | ✅ |
+| Keyboard Lock (Esc, Tab, Ctrl+T/N/W/L/R) | ✅ | ❌ not supported |
+| Detection (`visibilitychange`, `blur`, `fullscreenchange`) | ✅ | ✅ |
+| Blocking overlay until return + re-fullscreen | ✅ | ✅ |
+| Logged to MySQL with duration | ✅ | ✅ |
+| Host alerted live, per participant | ✅ | ✅ |
+
+**It cannot** capture Alt+Tab or Cmd+Tab — those belong to the operating
+system. It cannot see a second monitor, a phone, paper notes, or another person
+in the room. It records when *this tab* loses focus. It is a deterrent, and the
+host is shown which participants have reduced enforcement.
+
+Absences under 900 ms are not reported: that is a notification stealing focus,
+not someone looking an answer up, and reporting them would bury real incidents.
+At 3 violations the host is **prompted**, not forced — ejecting someone from an
+interview is a judgement call.
+
+---
+
+## HTTPS is required in production
+
+`getUserMedia`, the Web Speech API and Keyboard Lock all need a **secure
+context**. `http://localhost` counts, so local development and a one-machine
+demo work over plain HTTP.
+
+**They will not work from another device over `http://192.168.x.x`** — the
+camera simply never starts. A real deployment needs TLS in front of the
+frontend and `wss://` for the three WebSockets. The `docker-compose.yml` here
+does not provide TLS and is not intended to.
+
+---
+
+## Known limitations, stated plainly
+
+| Limitation | What it would take to remove |
+|---|---|
+| 17.5% WER on continuous signing | Continuous sign segmentation is an open research problem; more clips per sign and a model trained on unsegmented streams |
+| No signer-independent accuracy | A dataset that records signer identity, so whole people can be held out |
+| 7 ISL letters cannot be evaluated | A fingerspelling dataset with more than 2 distinct poses per letter |
+| H and J at 0% recall | Same — those letters have too few distinct poses to generalise from |
+| 40-word vocabulary, not a language | ISL has its own grammar and word order; this is isolated-sign recognition, not translation |
+| Docker stack unverified | Docker was not installed on the development machine; `docker compose up --build` has never been run |
+| Web Speech sends audio to Google | Use the Whisper engine, which runs on our own backend |
+| Tailwind build-chain advisories | A breaking Tailwind 4 migration. `npm audit --omit=dev` reports zero — they are dev-only with no exposure in the shipped bundle |
