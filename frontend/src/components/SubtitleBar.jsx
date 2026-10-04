@@ -11,7 +11,7 @@
  *   - the speaker is always named, since two directions of translation land
  *     in the same bar and "who said that?" must never be ambiguous.
  */
-export default function SubtitleBar({ subtitle }) {
+export default function SubtitleBar({ subtitle, textClassName = 'text-subtitle' }) {
   if (!subtitle?.text) {
     return (
       <div className="rounded-xl border border-ink-700 bg-ink-900/95 px-6 py-4">
@@ -51,7 +51,10 @@ export default function SubtitleBar({ subtitle }) {
       {/* Interim text is lighter and italic, so a reader can tell at a glance
           which words are settled and which may still be revised. */}
       <p
-        className={`text-subtitle break-words ${
+        // Size comes from the caption-size control, not a constant. 22px is the
+        // floor, not the ceiling — a caption someone cannot read is not a
+        // caption, and this audience is exactly who needs the larger steps.
+        className={`${textClassName} break-words ${
           subtitle.isFinal === false ? 'italic text-slate-300/80' : 'text-slate-50'
         }`}
       >

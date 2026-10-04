@@ -4,6 +4,12 @@ import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import HandOverlayCanvas from '../components/HandOverlayCanvas';
 import ModeSwitch from '../components/ModeSwitch';
 import SignDetectionPanel from '../components/SignDetectionPanel';
+import {
+  CaptionSizeControl,
+  CopyLinkButton,
+  MeetingTimer,
+  useCaptionSize,
+} from '../components/MeetingHeaderControls';
 import InterviewModeDialog from '../components/InterviewModeDialog';
 import InterviewModeOverlay from '../components/InterviewModeOverlay';
 import SpeechControls from '../components/SpeechControls';
@@ -43,6 +49,7 @@ const MAX_VIOLATIONS = 3;
 export default function MeetingRoom() {
   const { code } = useParams();
   const [searchParams] = useSearchParams();
+  const captionSize = useCaptionSize();
   const navigate = useNavigate();
   const { user } = useAuth();
 
@@ -539,7 +546,26 @@ export default function MeetingRoom() {
             {peer ? `with ${peer.name}` : 'waiting for the other participant'}
             {' · '}
             call {connectionState}
+            {meeting?.started_at && (
+              <>
+                {' · '}
+                <MeetingTimer startedAt={meeting.started_at} />
+              </>
+            )}
           </p>
+
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <CopyLinkButton code={code} />
+            <CaptionSizeControl size={captionSize.size} onChoose={captionSize.choose} />
+            {interviewOn && (
+              <span
+                className="rounded bg-signal-warn/20 px-2 py-1 text-xs font-semibold uppercase text-signal-warn"
+                role="status"
+              >
+                Interview mode
+              </span>
+            )}
+          </div>
         </div>
         <button type="button" onClick={leaveMeeting}
                 className="rounded-lg bg-signal-bad px-4 py-2 font-semibold text-ink-900 hover:opacity-90">
@@ -581,7 +607,7 @@ export default function MeetingRoom() {
             />
           </div>
 
-          <SubtitleBar subtitle={subtitle} />
+          <SubtitleBar subtitle={subtitle} textClassName={captionSize.className} />
 
           {/* --- control bar ------------------------------------------- */}
           <div className="flex flex-wrap items-center gap-2 rounded-xl border border-ink-700 bg-ink-800 p-3">
