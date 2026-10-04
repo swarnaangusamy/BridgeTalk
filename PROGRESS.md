@@ -154,3 +154,37 @@ Live-path latency: ASL 0.70 ms, ISL 0.71 ms, words 6.12 ms median.
    the browser is verified; the two-window click-through needs a human.
 
 ---
+
+## Final verification run (end of session)
+
+Both services restarted from cold, then the whole journey driven through the
+API. Every step passed.
+
+```
+/health   status ok | db connected | dialect mysql
+          ASL letters  loaded=True  28 classes
+          ISL letters  loaded=True  35 classes   <- did not exist at session start
+          ISL WORDS    loaded=True  40 classes  lang=ISL
+          Whisper      loaded=True  base
+
+OK  host + guest login                 200
+OK  create meeting                     201
+OK  host joins / guest joins           200
+OK  host switches interview mode ON    200  (start time stamped)
+OK  guest BLOCKED from toggling        403
+OK  host sees violation                1x, longest 37000ms
+OK  guest BLOCKED from the host log    403
+OK  sign caption saved                 201
+OK  speech caption saved               201
+OK  transcript returns both lines      200
+OK  history lists 25 meetings          200
+OK  TXT export    376 bytes            200
+OK  PDF export   2006 bytes            200  magic=%PDF
+OK  non-member blocked                 404
+OK  meeting ended                      200
+```
+
+Not covered by this run, and needing a human in a browser: the two-window
+click-through, the camera preview in the lobby, fullscreen and Keyboard Lock
+actually engaging, and a real microphone producing captions. Every layer
+beneath those is verified above.
