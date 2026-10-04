@@ -240,6 +240,79 @@ def rms(samples: np.ndarray) -> float:
 # --------------------------------------------------------------------------- #
 
 
+class StreamDecoder:
+    """Decodes a MediaRecorder stream that arrives in fragments.
+
+    THE BUG THIS EXISTS TO FIX
+    --------------------------
+    MediaRecorder with a timeslice emits a WebM stream in pieces, and only the
+    FIRST piece carries the initialisation segment — the EBML header, the track
+    entry, the codec private data. Every later piece is a bare cluster.
+
+    Decoding each piece independently therefore works exactly once. Measured on
+    a real Opus/WebM recording split into four:
+
+        chunk 0 alone  -> 5,016 samples   OK
+        chunk 1 alone  ->     0 samples   fails
+        chunk 2 alone  ->     0 samples   fails
+        chunk 3 alone  ->     0 samples   fails
+
+    So the server received the first 250 ms of speech and then silence forever.
+    The voice-activity detector saw one burst shorter than MIN_UTTERANCE_S,
+    discarded it, and no caption was ever produced. Nothing logged an error,
+    because "ffmpeg returned no audio" is indistinguishable from "that chunk
+    was quiet".
+
+    THE FIX
+    -------
+    Keep the whole stream for the current utterance and decode it as one, then
+    feed forward only the samples that are new since the last call. ffmpeg gets
+    a valid, complete WebM document every time.
+
+    Re-decoding looks wasteful and is affordable: utterances are capped at
+    MAX_UTTERANCE_S, decoding 12 s of Opus takes well under 100 ms, and it
+    happens in a worker thread. Prepending the header to each fragment instead
+    is cheaper but produces gaps and duplicated audio at the seams, which is
+    worse than slow.
+    """
+
+    def __init__(self) -> None:
+        self._header = b""
+        self._buffer = b""
+        self._consumed = 0
+
+    def push(self, chunk: bytes) -> np.ndarray:
+        """Add a fragment; return only the newly decodable samples."""
+        if not chunk:
+            return np.zeros(0, dtype=np.float32)
+
+        if not self._header:
+            # The first fragment is the initialisation segment. Kept so the
+            # buffer can be reset to a decodable state after each utterance.
+            self._header = chunk
+            self._buffer = chunk
+        else:
+            self._buffer += chunk
+
+        samples = decode_to_pcm(self._buffer)
+        if samples.size <= self._consumed:
+            # Nothing new decoded. Happens when a fragment lands mid-frame.
+            return np.zeros(0, dtype=np.float32)
+
+        fresh = samples[self._consumed :]
+        self._consumed = samples.size
+        return fresh
+
+    def reset_after_utterance(self) -> None:
+        """Start a fresh buffer, keeping the header so it stays decodable.
+
+        Without this the buffer would grow for the whole meeting and every
+        decode would get slower.
+        """
+        self._buffer = self._header
+        self._consumed = decode_to_pcm(self._header).size if self._header else 0
+
+
 class UtteranceBuffer:
     """Accumulates audio and decides where one utterance ends.
 
@@ -369,6 +442,7 @@ async def transcribe_socket(
         return
 
     buffer = UtteranceBuffer()
+    decoder = StreamDecoder()
     language = "en-IN"
 
     await websocket.send_json(
@@ -434,6 +508,7 @@ async def transcribe_socket(
                     remainder = buffer.flush()
                     if remainder is not None:
                         await transcribe_and_send(remainder)
+                    await asyncio.to_thread(decoder.reset_after_utterance)
                 else:
                     await websocket.send_json(
                         _error("INVALID_MESSAGE", f"Unknown control: {control.get('type')!r}")
@@ -445,10 +520,15 @@ async def transcribe_socket(
             if not audio:
                 continue
 
-            samples = await asyncio.to_thread(decode_to_pcm, audio)
+            # Through the stream decoder, NOT decode_to_pcm directly: a bare
+            # fragment is not a decodable WebM document. See StreamDecoder.
+            samples = await asyncio.to_thread(decoder.push, audio)
             utterance = buffer.push(samples)
             if utterance is not None:
                 await transcribe_and_send(utterance)
+                # The utterance is done, so the accumulated stream can be
+                # dropped back to just the header.
+                await asyncio.to_thread(decoder.reset_after_utterance)
 
     except WebSocketDisconnect:
         pass

@@ -12,6 +12,12 @@ import { WhisperProvider } from './WhisperProvider';
  * the UI can say so plainly.
  */
 
+export const ENGINE_CHOICES = [
+  { id: 'auto', label: 'Auto', note: 'Browser engine where available, Whisper otherwise.' },
+  { id: 'webspeech', label: 'Browser', note: 'Word-by-word. Chrome/Edge only. Audio goes to Google.' },
+  { id: 'whisper', label: 'Whisper', note: 'Runs on this project’s backend. Captions appear when you pause.' },
+];
+
 export const PROVIDERS = {
   webspeech: {
     id: 'webspeech',
@@ -47,7 +53,44 @@ export function isProviderSupported(id) {
  * user "you asked for Web Speech, this browser has none, using Whisper"
  * instead of silently doing something different from what was requested.
  */
-export function resolveProvider(preferred = 'webspeech') {
+/**
+ * "Auto" is the default, and it exists because the two engines are not
+ * interchangeable from a user's point of view.
+ *
+ * Web Speech streams interim text word by word, so captions appear while you
+ * are still talking. Whisper transcribes finished audio, so nothing appears
+ * until you pause — correct, but it reads as a broken feature if you were not
+ * told. Auto therefore prefers Web Speech wherever it exists and falls back
+ * only when it genuinely cannot run.
+ *
+ * Whisper must NOT be the default in Chrome or Edge, which is what the
+ * reported "spoke and nothing happened" turned out to be: Whisper was
+ * selected, it was waiting for an utterance to end, and the status line said
+ * "listening" the whole time.
+ */
+export function resolveAuto() {
+  if (isProviderSupported('webspeech')) {
+    return {
+      id: 'webspeech',
+      fellBack: false,
+      reason: null,
+    };
+  }
+  if (isProviderSupported('whisper')) {
+    return {
+      id: 'whisper',
+      fellBack: true,
+      reason:
+        'This browser has no Web Speech API, so Whisper is being used. ' +
+        'Captions appear when you pause rather than word by word.',
+    };
+  }
+  return { id: null, fellBack: false, reason: 'No speech engine works in this browser.' };
+}
+
+export function resolveProvider(preferred = 'auto') {
+  if (preferred === 'auto') return resolveAuto();
+
   if (isProviderSupported(preferred)) {
     return { id: preferred, fellBack: false, reason: null };
   }

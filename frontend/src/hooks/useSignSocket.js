@@ -21,7 +21,7 @@ const INITIAL_RETRY_MS = 500;
 const MAX_RETRY_MS = 10_000;
 const MAX_ATTEMPTS = 12;
 
-export function useSignSocket({ meetingCode, enabled = true, onSubtitle } = {}) {
+export function useSignSocket({ meetingCode, enabled = true, onCaption } = {}) {
   const socketRef = useRef(null);
   const retryTimerRef = useRef(null);
   const attemptRef = useRef(0);
@@ -43,10 +43,10 @@ export function useSignSocket({ meetingCode, enabled = true, onSubtitle } = {}) 
 
   // Kept in a ref so a changing callback identity does not tear down and
   // rebuild the socket on every parent render.
-  const onSubtitleRef = useRef(onSubtitle);
+  const onCaptionRef = useRef(onCaption);
   useEffect(() => {
-    onSubtitleRef.current = onSubtitle;
-  }, [onSubtitle]);
+    onCaptionRef.current = onCaption;
+  }, [onCaption]);
 
   const connect = useCallback(() => {
     if (!meetingCode) return;
@@ -95,9 +95,12 @@ export function useSignSocket({ meetingCode, enabled = true, onSubtitle } = {}) 
           setSentence(message.sentence ?? '');
           break;
 
-        case 'subtitle':
-          // Text recognised by the *other* participant.
-          onSubtitleRef.current?.(message);
+        case 'caption':
+          // One event for both sources, from EVERY participant including
+          // ourselves. The receiver replaces the line with this segment_id
+          // rather than appending — that is what stops a caption growing into
+          // "warm warm warm" as interims arrive.
+          onCaptionRef.current?.(message);
           break;
 
         case 'error':
@@ -189,17 +192,36 @@ export function useSignSocket({ meetingCode, enabled = true, onSubtitle } = {}) 
   }, []);
 
   /**
-   * Relay recognised speech to the other participant.
+   * Send a caption, from either source.
    *
-   * Speech travels on this socket rather than the signalling one because this
+   * Both directions use this one call. They used to have separate message
+   * types and separate server handling, which is how the sign path ended up
+   * broadcasting the whole accumulated sentence while speech sent only the
+   * current phrase.
+   *
+   * `segmentId` is the producer's id for this utterance and must stay the same
+   * across every interim and the final. The server keys its single transcript
+   * row on it.
+   *
+   * Captions travel on this socket rather than the signalling one because this
    * is the meeting's *text* channel — both translation directions belong
    * together, and a dropped video call must not take the captions down too.
    */
-  const sendSpeech = useCallback((text, isFinal) => {
+  const sendCaption = useCallback(({ segmentId, source, text, isFinal, confidence = null }) => {
     const socket = socketRef.current;
-    if (!socket || socket.readyState !== WebSocket.OPEN || !text) return false;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+    if (!segmentId || !source) return false;
 
-    socket.send(JSON.stringify({ type: 'speech', text, is_final: Boolean(isFinal) }));
+    socket.send(
+      JSON.stringify({
+        type: 'caption',
+        segment_id: segmentId,
+        source,
+        text: text ?? '',
+        is_final: Boolean(isFinal),
+        confidence,
+      }),
+    );
     return true;
   }, []);
 
@@ -220,7 +242,7 @@ export function useSignSocket({ meetingCode, enabled = true, onSubtitle } = {}) 
     dynamicModelInfo,
     islModelInfo,
     sendLandmarks,
-    sendSpeech,
+    sendCaption,
     clearSentence,
     backspace,
     isConnected: status === 'open',

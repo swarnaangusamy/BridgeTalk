@@ -14,6 +14,8 @@ machine where faster-whisper was never installed.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -332,3 +334,177 @@ def test_transcribe_socket_reports_a_missing_model_clearly(client, registered_us
     assert message["code"] == "MODEL_NOT_LOADED"
     # The message must point at the fix, not just state the problem.
     assert message["message"]
+
+
+# --------------------------------------------------------------------------- #
+# Real audio through the real code path
+# --------------------------------------------------------------------------- #
+#
+# The reported bug was "spoke with Whisper selected, nothing happened". The
+# cause was that MediaRecorder sends a WebM stream in fragments and only the
+# FIRST carries the initialisation segment, so every later fragment decoded to
+# zero samples. The server received 250 ms of audio and then silence forever.
+#
+# These tests feed a recorded sentence through the same functions the socket
+# uses, so that failure cannot come back silently.
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def _whisper_available() -> bool:
+    try:
+        import faster_whisper  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _ffmpeg_available() -> bool:
+    from app.ws.transcribe import _have_ffmpeg
+
+    return _have_ffmpeg()
+
+
+@pytest.mark.skipif(not _ffmpeg_available(), reason="ffmpeg not installed")
+def test_a_whole_webm_file_decodes():
+    """The baseline. If this fails, nothing downstream can work."""
+    from app.ws.transcribe import SAMPLE_RATE, decode_to_pcm
+
+    raw = (FIXTURES / "speech_sample.webm").read_bytes()
+    samples = decode_to_pcm(raw)
+
+    assert samples.size > SAMPLE_RATE, "less than a second of audio decoded"
+    assert samples.dtype == np.float32
+
+
+@pytest.mark.skipif(not _ffmpeg_available(), reason="ffmpeg not installed")
+def test_a_bare_fragment_does_not_decode_on_its_own():
+    """Pins the bug's mechanism, so the fix cannot be removed silently.
+
+    This asserts the BROKEN behaviour of the naive approach deliberately: a
+    later fragment genuinely is not a decodable document. If this ever starts
+    returning audio, StreamDecoder's whole reason for existing has changed and
+    the comment explaining it is wrong.
+    """
+    from app.ws.transcribe import decode_to_pcm
+
+    raw = (FIXTURES / "speech_sample.webm").read_bytes()
+    midpoint = len(raw) // 2
+    tail = raw[midpoint:]
+
+    assert decode_to_pcm(tail).size == 0, (
+        "a bare WebM fragment decoded on its own — the premise of StreamDecoder"
+    )
+
+
+@pytest.mark.skipif(not _ffmpeg_available(), reason="ffmpeg not installed")
+def test_stream_decoder_recovers_every_fragment():
+    """The fix. Fed in pieces, it yields the same audio as the whole file."""
+    from app.ws.transcribe import StreamDecoder, decode_to_pcm
+
+    raw = (FIXTURES / "speech_sample.webm").read_bytes()
+    whole = decode_to_pcm(raw).size
+
+    decoder = StreamDecoder()
+    size = len(raw) // 6
+    total = 0
+    for index in range(6):
+        chunk = raw[index * size : (index + 1) * size] if index < 5 else raw[index * size :]
+        total += decoder.push(chunk).size
+
+    # Should recover essentially all of it. Not exactly equal, because the
+    # final partial frame may not be decodable until the stream ends.
+    assert total > whole * 0.9, f"recovered {total} of {whole} samples"
+
+
+@pytest.mark.skipif(not _ffmpeg_available(), reason="ffmpeg not installed")
+def test_fragments_reach_the_utterance_buffer_as_speech():
+    """End to end up to the VAD: fragments in, a complete utterance out.
+
+    This is the step that silently failed before. The buffer only ever saw one
+    short burst, which was below MIN_UTTERANCE_S and therefore discarded.
+    """
+    from app.ws.transcribe import SAMPLE_RATE, StreamDecoder, UtteranceBuffer
+
+    raw = (FIXTURES / "speech_sample.webm").read_bytes()
+    decoder = StreamDecoder()
+    buffer = UtteranceBuffer()
+
+    size = len(raw) // 8
+    for index in range(8):
+        chunk = raw[index * size : (index + 1) * size] if index < 7 else raw[index * size :]
+        buffer.push(decoder.push(chunk))
+
+    # The recording ends without trailing silence, so flush is what closes it —
+    # exactly what the socket's "flush" control message does.
+    utterance = buffer.flush()
+    assert utterance is not None, "fragments never accumulated into an utterance"
+    assert utterance.size > SAMPLE_RATE, "utterance shorter than a second"
+
+
+@pytest.mark.skipif(
+    not (_whisper_available() and _ffmpeg_available()),
+    reason="needs faster-whisper and ffmpeg",
+)
+def test_recorded_speech_comes_back_as_text():
+    """The acceptance test A3 asks for: real audio in, real words out.
+
+    Asserts on a couple of distinctive words rather than the exact sentence —
+    the `base` model is not perfect and pinning the full string would make this
+    test fail for a reason that is not a regression.
+    """
+    from app.ws.transcribe import StreamDecoder, UtteranceBuffer, transcriber
+
+    if not transcriber.is_loaded and not transcriber.load():
+        pytest.skip(f"model unavailable: {transcriber.load_error}")
+
+    raw = (FIXTURES / "speech_sample.webm").read_bytes()
+    decoder = StreamDecoder()
+    buffer = UtteranceBuffer()
+
+    size = len(raw) // 8
+    for index in range(8):
+        chunk = raw[index * size : (index + 1) * size] if index < 7 else raw[index * size :]
+        buffer.push(decoder.push(chunk))
+
+    utterance = buffer.flush()
+    assert utterance is not None
+
+    # 'en', not 'en-IN'. Whisper takes ISO-639-1; the browser sends BCP-47 and
+    # transcribe() splits it. Passing the region through returns no text.
+    text, confidence = transcriber.transcribe(utterance, "en-IN")
+
+    assert text, "Whisper returned no text for a clear recorded sentence"
+    lowered = text.lower()
+    assert "caption" in lowered or "see this" in lowered, f"got {text!r}"
+    assert confidence is None or 0.0 <= confidence <= 1.0
+
+
+@pytest.mark.skipif(
+    not (_whisper_available() and _ffmpeg_available()),
+    reason="needs faster-whisper and ffmpeg",
+)
+def test_the_language_region_is_stripped_before_reaching_whisper():
+    """'en-IN' must become 'en'. Whisper rejects the regional tag.
+
+    A3 lists this as a specific suspect, so it is pinned rather than assumed.
+    """
+    from app.ws.transcribe import transcriber
+
+    if not transcriber.is_loaded and not transcriber.load():
+        pytest.skip("model unavailable")
+
+    captured = {}
+    original = transcriber._model.transcribe
+
+    def spy(samples, **kwargs):
+        captured["language"] = kwargs.get("language")
+        return original(samples, **kwargs)
+
+    transcriber._model.transcribe = spy
+    try:
+        transcriber.transcribe(speech(1.5), "en-IN")
+    finally:
+        transcriber._model.transcribe = original
+
+    assert captured["language"] == "en", f"Whisper was given {captured['language']!r}"
