@@ -3,12 +3,13 @@
 import secrets
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException, status
-from sqlalchemy import select
+from fastapi import APIRouter, HTTPException, Query, status
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.deps import CurrentUser, DbSession
 from app.models.meeting import FocusEvent, FocusEventType, Meeting, MeetingParticipant
+from app.models.transcript import Transcript
 from app.models.user import User
 from app.schemas.focus import (
     FocusEventCreate,
@@ -22,6 +23,7 @@ from app.schemas.meeting import (
     MeetingDetail,
     MeetingJoinResponse,
     MeetingPublic,
+    MeetingSummary,
 )
 
 router = APIRouter(prefix="/api/meetings", tags=["meetings"])
@@ -134,27 +136,106 @@ def create_meeting(payload: MeetingCreate, db: DbSession, current_user: CurrentU
     return meeting
 
 
-@router.get("/history", response_model=list[MeetingPublic], summary="Meetings you took part in")
-def meeting_history(db: DbSession, current_user: CurrentUser) -> list[Meeting]:
+@router.get(
+    "/history",
+    response_model=list[MeetingSummary],
+    summary="Meetings you took part in",
+)
+def meeting_history(
+    db: DbSession,
+    current_user: CurrentUser,
+    q: str | None = Query(
+        default=None,
+        max_length=200,
+        description=(
+            "Free-text search over meeting titles AND saved caption text. "
+            "Omit to list everything."
+        ),
+    ),
+) -> list[MeetingSummary]:
     """Every meeting the caller hosted or attended, newest first.
 
     Declared before the /{code} route on purpose: FastAPI matches routes in
     declaration order, so /{code} would otherwise swallow "history" and try to
     look up a meeting whose code is literally "history".
+
+    QUERY COUNT IS THE WHOLE DESIGN OF THIS FUNCTION
+    ------------------------------------------------
+    The history page and the home page both draw participant avatars and a
+    caption count for every row. Fetched naively that is 2N+1 queries for N
+    meetings, and it gets worse as a user accumulates history — exactly the
+    cost MeetingDetail's docstring warns about.
+
+    This is four queries regardless of N:
+
+      1. the meetings themselves
+      2. `selectinload(Meeting.participants)` — one IN query for all of them
+      3. `.selectinload(MeetingParticipant.user)` — one IN query for all users
+      4. one grouped COUNT over transcripts
+
+    The grouped count is the part that is easy to get wrong. One
+    `len(meeting.transcripts)` per meeting would load every caption row of
+    every meeting into memory just to count them, which for a day of demos is
+    tens of thousands of rows to produce a handful of integers.
     """
     hosted = select(Meeting.id).where(Meeting.host_id == current_user.id)
     attended = select(MeetingParticipant.meeting_id).where(
         MeetingParticipant.user_id == current_user.id
     )
 
-    meetings = db.scalars(
+    statement = (
         select(Meeting)
         .where(Meeting.id.in_(hosted.union(attended)))
-        .options(selectinload(Meeting.host))
+        .options(
+            selectinload(Meeting.host),
+            selectinload(Meeting.participants).selectinload(MeetingParticipant.user),
+        )
         .order_by(Meeting.created_at.desc())
-    ).all()
+    )
 
-    return list(meetings)
+    # The history page's search box covers titles AND what was said, because
+    # "the meeting where we talked about the dataset" is how people actually
+    # look for a transcript — they remember a phrase, not a title.
+    #
+    # Caption text is matched with a subquery rather than a JOIN. A join would
+    # return one row per matching caption, so a meeting containing the word
+    # twenty times would appear twenty times and would need a DISTINCT that
+    # defeats the eager loading below.
+    #
+    # `ilike` rather than `like`: MySQL's default collation is already
+    # case-insensitive, but SQLite's LIKE is case-sensitive for non-ASCII and
+    # the documented zero-setup fallback is SQLite. SQLAlchemy compiles `ilike`
+    # to LOWER(...) LIKE LOWER(...) where it has to, so the two backends agree.
+    if q and q.strip():
+        needle = f"%{q.strip()}%"
+        said_it = select(Transcript.meeting_id).where(Transcript.content.ilike(needle))
+        statement = statement.where(
+            or_(Meeting.title.ilike(needle), Meeting.id.in_(said_it))
+        )
+
+    meetings = db.scalars(statement).all()
+
+    if not meetings:
+        return []
+
+    counts = dict(
+        db.execute(
+            select(Transcript.meeting_id, func.count(Transcript.id))
+            .where(Transcript.meeting_id.in_([meeting.id for meeting in meetings]))
+            .group_by(Transcript.meeting_id)
+        ).all()
+    )
+
+    return [
+        # Validated from the ORM object, then copied with the count layered on.
+        # `model_validate` has no `update` argument in pydantic v2 — that is
+        # `model_copy` — and setting `meeting.caption_count` instead would make
+        # SQLAlchemy treat the instance as having a dirty column.
+        MeetingSummary.model_validate(meeting).model_copy(
+            update={"caption_count": counts.get(meeting.id, 0)}
+        )
+        for meeting in meetings
+    ]
 
 
 @router.get("/{code}", response_model=MeetingDetail, summary="Meeting detail")

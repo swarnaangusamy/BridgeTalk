@@ -411,3 +411,181 @@ def test_non_members_cannot_export(client, second_headers, joined_meeting):
         f"/api/transcripts/{joined_meeting['id']}/export", headers=second_headers
     )
     assert response.status_code == 403
+
+
+def test_history_rows_carry_participants_and_a_caption_count(
+    client, auth_headers, second_headers, meeting
+):
+    """The home and history pages draw avatars and a caption count per row.
+
+    Both come from this one endpoint on purpose. The alternative — the frontend
+    fetching each meeting to find out who was in it — is an N+1 moved onto the
+    network, so the data has to be here or the interface cannot be drawn
+    without it.
+    """
+    # BOTH join. Creating a meeting does not make the host a participant —
+    # `participants` is an attendance log, and the host appears in it only once
+    # they actually arrive through the lobby, which is what happens in use.
+    client.post(f"/api/meetings/{meeting['code']}/join", headers=auth_headers)
+    client.post(f"/api/meetings/{meeting['code']}/join", headers=second_headers)
+
+    # Two saved captions for this meeting, one from each participant.
+    for headers, text in ((auth_headers, "hello"), (second_headers, "good morning")):
+        created = client.post(
+            "/api/transcripts",
+            json={"meeting_id": meeting["id"], "source": "speech", "content": text},
+            headers=headers,
+        )
+        assert created.status_code == 201, created.text
+
+    rows = client.get("/api/meetings/history", headers=auth_headers).json()
+    row = next(item for item in rows if item["code"] == meeting["code"])
+
+    # Participants, with their users resolved — this is what the avatars need.
+    names = {participant["user"]["name"] for participant in row["participants"]}
+    assert len(row["participants"]) == 2, row["participants"]
+    assert all(name for name in names)
+
+    assert row["caption_count"] == 2, row
+
+
+def test_history_caption_count_is_zero_for_a_meeting_with_no_captions(
+    client, auth_headers, meeting
+):
+    """Zero, not absent.
+
+    The count comes from a grouped COUNT, which returns no ROW at all for a
+    meeting with no transcripts rather than a row containing 0. A dict lookup
+    without a default would then raise KeyError on the commonest case there is:
+    a meeting nobody has spoken in yet.
+    """
+    rows = client.get("/api/meetings/history", headers=auth_headers).json()
+    row = next(item for item in rows if item["code"] == meeting["code"])
+    assert row["caption_count"] == 0
+
+
+def test_history_does_not_issue_a_query_per_meeting(
+    client, auth_headers, second_headers, db_session
+):
+    """Guards the eager loading, which is easy to delete by accident.
+
+    Without `selectinload`, serialising participants lazy-loads them one
+    meeting at a time, so the query count grows with the number of meetings.
+    The assertion is deliberately loose — it checks that the count does not
+    SCALE, not that it equals a specific number, so adding a column does not
+    fail the test while removing the eager load does.
+    """
+    from sqlalchemy import event
+
+    for index in range(6):
+        created = client.post(
+            "/api/meetings", json={"title": f"Meeting {index}"}, headers=auth_headers
+        ).json()
+        client.post(f"/api/meetings/{created['code']}/join", headers=second_headers)
+
+    statements: list[str] = []
+
+    def record(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    engine = db_session.get_bind()
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        response = client.get("/api/meetings/history", headers=auth_headers)
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+
+    assert response.status_code == 200
+    assert len(response.json()) >= 6
+
+    selects = [s for s in statements if s.lstrip().upper().startswith("SELECT")]
+    # The endpoint itself issues four: meetings, participants, users, counts.
+    # The authenticated-user lookup adds one more. Ten leaves room for a
+    # reasonable change while still failing hard if this becomes 2N+1 — which
+    # for seven meetings would be fifteen or more.
+    assert len(selects) <= 10, f"{len(selects)} SELECTs:\n" + "\n".join(selects)
+
+
+# ---------------------------------------------------------------------------
+# History search
+# ---------------------------------------------------------------------------
+
+
+def test_history_search_matches_meeting_titles(client, auth_headers):
+    client.post("/api/meetings", json={"title": "Dataset review"}, headers=auth_headers)
+    client.post("/api/meetings", json={"title": "Guide meeting"}, headers=auth_headers)
+
+    rows = client.get("/api/meetings/history?q=dataset", headers=auth_headers).json()
+    assert [row["title"] for row in rows] == ["Dataset review"]
+
+
+def test_history_search_matches_caption_text(client, auth_headers, meeting):
+    """Searching what was SAID, not only what the meeting was called.
+
+    This is the half of the search that needs the subquery over transcripts;
+    without it, a user who remembers a phrase but not the title cannot find
+    their transcript at all.
+    """
+    client.post(
+        "/api/transcripts",
+        json={
+            "meeting_id": meeting["id"],
+            "source": "sign",
+            "content": "the normalisation must agree",
+        },
+        headers=auth_headers,
+    )
+    other = client.post(
+        "/api/meetings", json={"title": "Unrelated"}, headers=auth_headers
+    ).json()
+
+    rows = client.get("/api/meetings/history?q=normalisation", headers=auth_headers).json()
+    codes = {row["code"] for row in rows}
+    assert meeting["code"] in codes
+    assert other["code"] not in codes
+
+
+def test_history_search_is_case_insensitive(client, auth_headers, meeting):
+    client.post(
+        "/api/transcripts",
+        json={"meeting_id": meeting["id"], "source": "speech", "content": "Good Morning"},
+        headers=auth_headers,
+    )
+    rows = client.get("/api/meetings/history?q=GOOD+morning", headers=auth_headers).json()
+    assert {row["code"] for row in rows} == {meeting["code"]}
+
+
+def test_history_search_returns_each_meeting_once(client, auth_headers, meeting):
+    """A meeting where a word was said many times must appear ONCE.
+
+    This is why the caption match is a subquery and not a JOIN: a join produces
+    one row per matching caption, so this meeting would come back five times.
+    """
+    for _ in range(5):
+        client.post(
+            "/api/transcripts",
+            json={"meeting_id": meeting["id"], "source": "sign", "content": "hello"},
+            headers=auth_headers,
+        )
+
+    rows = client.get("/api/meetings/history?q=hello", headers=auth_headers).json()
+    assert len(rows) == 1, rows
+    assert rows[0]["caption_count"] == 5
+
+
+def test_history_search_still_excludes_other_peoples_meetings(
+    client, auth_headers, second_headers, meeting
+):
+    """Search must not become a way around the membership filter."""
+    client.post(
+        "/api/transcripts",
+        json={"meeting_id": meeting["id"], "source": "speech", "content": "secret plan"},
+        headers=auth_headers,
+    )
+    rows = client.get("/api/meetings/history?q=secret", headers=second_headers).json()
+    assert rows == []
+
+
+def test_history_blank_search_lists_everything(client, auth_headers, meeting):
+    rows = client.get("/api/meetings/history?q=%20%20", headers=auth_headers).json()
+    assert len(rows) >= 1

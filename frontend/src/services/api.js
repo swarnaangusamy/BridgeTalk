@@ -117,7 +117,20 @@ export const meetings = {
   join: (code) => request(`/api/meetings/${encodeURIComponent(code)}/join`, { method: 'POST' }),
   leave: (code) => request(`/api/meetings/${encodeURIComponent(code)}/leave`, { method: 'POST' }),
   end: (code) => request(`/api/meetings/${encodeURIComponent(code)}/end`, { method: 'POST' }),
-  history: () => request('/api/meetings/history'),
+  /**
+   * Meetings the caller hosted or attended, newest first.
+   *
+   * `query` searches titles AND saved caption text server-side. It has to be
+   * the server's job: the caption text is not in the browser, and fetching
+   * every transcript to grep it locally would download a whole meeting history
+   * to answer one keystroke.
+   */
+  history: (query = '') =>
+    request(
+      query.trim()
+        ? `/api/meetings/history?q=${encodeURIComponent(query.trim())}`
+        : '/api/meetings/history',
+    ),
   logFocusEvent: (code, eventType, durationMs = null) =>
     request(`/api/meetings/${encodeURIComponent(code)}/focus-events`, {
       method: 'POST',

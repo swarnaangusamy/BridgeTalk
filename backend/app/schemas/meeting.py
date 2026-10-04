@@ -72,6 +72,34 @@ class MeetingDetail(MeetingPublic):
     participants: list[ParticipantPublic] = []
 
 
+class MeetingSummary(MeetingDetail):
+    """A meeting as it appears in the history list and on the home page.
+
+    Adds the two things the interface needs for a meeting row that the detail
+    view does not: who took part (so their avatars can be shown) and how many
+    captions were saved.
+
+    WHY THIS CARRIES PARTICIPANTS, WHICH MeetingDetail's DOCSTRING WARNED OFF
+    ------------------------------------------------------------------------
+    MeetingDetail notes that listing history should not "drag every participant
+    row along with every meeting". That concern was about the N+1 query a naive
+    list would cause, and it is addressed rather than ignored: the history
+    endpoint eager-loads participants with `selectinload`, which costs two
+    extra queries for the whole page regardless of how many meetings it
+    returns, and the caption counts come from one grouped COUNT rather than one
+    per meeting. Four queries total, not 2N+1.
+
+    The alternative was for the frontend to fetch each meeting individually to
+    draw its avatars, which is the N+1 the warning was about, moved to the
+    network where it costs more.
+    """
+
+    caption_count: int = Field(
+        default=0,
+        description="Number of saved caption rows, i.e. transcript entries.",
+    )
+
+
 class MeetingJoinResponse(BaseModel):
     """Response to POST /api/meetings/{code}/join."""
 
