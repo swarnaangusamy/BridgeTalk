@@ -56,7 +56,17 @@ WS_POLICY_VIOLATION = 1008
 # rejected: this socket is a dumb pipe for a fixed vocabulary, and keeping the
 # list closed means a malformed or hostile client cannot use it as a general
 # purpose message bus between participants.
-RELAYED_TYPES = {"offer", "answer", "ice-candidate", "hangup"}
+# Presentation start/stop are PRESENCE, which is what this socket already
+# carries. They are relayed verbatim like everything else here — the server
+# still does not parse SDP, ICE, or anything about the screen being shared.
+RELAYED_TYPES = {
+    "offer",
+    "answer",
+    "ice-candidate",
+    "hangup",
+    "presentation-start",
+    "presentation-stop",
+}
 
 
 def _authenticate(token: str) -> User | None:

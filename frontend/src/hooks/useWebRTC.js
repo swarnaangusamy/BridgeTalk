@@ -75,6 +75,23 @@ const ICE_SERVERS = [
 
 export function useWebRTC({ meetingCode, localStream, enabled = true }) {
   const peerRef = useRef(null);
+  // --- perfect negotiation state -------------------------------------------
+  // Needed because adding the screen-share track AFTER the call is up requires
+  // a second offer/answer round. Without renegotiation the local peer happily
+  // adds the track and the remote side never receives it.
+  //
+  // Whoever adds a track must offer, and that is not necessarily the peer that
+  // made the first offer — so both sides can now offer, and the standard
+  // polite/impolite roles resolve the collision. The POLITE peer rolls back
+  // its own offer and accepts the other's; the impolite peer ignores the
+  // incoming one. Without this, two simultaneous offers deadlock the
+  // connection in have-local-offer.
+  const makingOfferRef = useRef(false);
+  const ignoreOfferRef = useRef(false);
+  const politeRef = useRef(true);
+  // The stream id the remote peer announced as its screen share, so an
+  // inbound track can be routed to the right tile.
+  const screenStreamIdRef = useRef(null);
 
   /**
    * Swap the outgoing video track without renegotiating.
@@ -90,6 +107,34 @@ export function useWebRTC({ meetingCode, localStream, enabled = true }) {
    * Passing null makes the sender transmit nothing, which is what the remote
    * side should see while the camera is released.
    */
+  /**
+   * Add the screen track to the live connection, as an ADDITIONAL track.
+   *
+   * Deliberately not replaceTrack on the camera sender: the signer must stay
+   * visible while they present, which is the whole point for this audience.
+   * addTrack triggers onnegotiationneeded, which offers again.
+   */
+  const addScreenTrack = useCallback((track, stream) => {
+    const connection = peerRef.current;
+    if (!connection || !track) return null;
+    try {
+      const sender = connection.addTrack(track, stream);
+      return sender;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const removeScreenSender = useCallback((sender) => {
+    const connection = peerRef.current;
+    if (!connection || !sender) return;
+    try {
+      connection.removeTrack(sender);
+    } catch {
+      // Connection already closed.
+    }
+  }, []);
+
   const replaceVideoTrack = useCallback(async (track) => {
     const connection = peerRef.current;
     if (!connection) return false;
@@ -115,6 +160,8 @@ export function useWebRTC({ meetingCode, localStream, enabled = true }) {
   const intentionalCloseRef = useRef(false);
 
   const [remoteStream, setRemoteStream] = useState(null);
+  const [remoteScreenStream, setRemoteScreenStream] = useState(null);
+  const [remotePresenter, setRemotePresenter] = useState(null);
   const [connectionState, setConnectionState] = useState('new');
   const [peer, setPeer] = useState(null);
   const [signalStatus, setSignalStatus] = useState('idle');
@@ -139,9 +186,39 @@ export function useWebRTC({ meetingCode, localStream, enabled = true }) {
     }
 
     connection.ontrack = (event) => {
-      // event.streams[0] is the remote MediaStream. Setting it in state hands
-      // it to the <video> element for the other participant's tile.
-      setRemoteStream(event.streams[0] ?? null);
+      // Two inbound video streams are now possible: the camera and, while
+      // someone is presenting, their screen. They are distinguished by stream
+      // id rather than by arrival order, because order is not guaranteed and
+      // mixing them up would put the screen in the camera tile.
+      const stream = event.streams[0] ?? null;
+      if (!stream) return;
+
+      if (screenStreamIdRef.current && stream.id === screenStreamIdRef.current) {
+        setRemoteScreenStream(stream);
+        // When the presenter stops, the track ends rather than the stream
+        // disappearing, so the end has to be watched for explicitly.
+        event.track.addEventListener('ended', () => setRemoteScreenStream(null));
+        return;
+      }
+      setRemoteStream(stream);
+    };
+
+    // Fires whenever the set of tracks changes — which is exactly what
+    // starting and stopping a screen share does.
+    connection.onnegotiationneeded = async () => {
+      try {
+        makingOfferRef.current = true;
+        // No argument: setLocalDescription() with no description creates the
+        // right kind (offer or answer) for the current signalling state. Doing
+        // it manually is where renegotiation bugs come from.
+        await connection.setLocalDescription();
+        send({ type: 'offer', payload: connection.localDescription });
+      } catch {
+        // A failed renegotiation leaves the existing call intact; the new
+        // track simply is not received.
+      } finally {
+        makingOfferRef.current = false;
+      }
     };
 
     connection.onicecandidate = (event) => {
@@ -212,6 +289,10 @@ export function useWebRTC({ meetingCode, localStream, enabled = true }) {
           setPeer(message.peers?.[0] ?? null);
           // The second arrival initiates — it is the one that knows somebody
           // is already waiting.
+          // The designated initiator is the IMPOLITE peer. Assigning the
+          // roles from the same flag that already decides who offers first
+          // keeps one source of truth for "which side yields".
+          politeRef.current = !message.should_initiate;
           if (message.should_initiate) await startCall();
           break;
 
@@ -225,17 +306,46 @@ export function useWebRTC({ meetingCode, localStream, enabled = true }) {
           break;
 
         case 'offer': {
+          // --- offer collision handling ---------------------------------
+          // Both sides can now offer, because whoever adds a screen-share
+          // track must renegotiate. So two offers can cross in flight.
+          //
+          // The IMPOLITE peer ignores an incoming offer while it has one of
+          // its own outstanding; the POLITE peer rolls its own back and
+          // accepts. Without this the connection sticks in have-local-offer
+          // and the call freezes — and it freezes for the whole call, not just
+          // the screen share.
+          const offerCollision =
+            makingOfferRef.current || connection.signalingState !== 'stable';
+
+          ignoreOfferRef.current = !politeRef.current && offerCollision;
+          if (ignoreOfferRef.current) break;
+
           await connection.setRemoteDescription(new RTCSessionDescription(message.payload));
           await flushPendingCandidates(connection);
-          const answer = await connection.createAnswer();
-          await connection.setLocalDescription(answer);
-          send({ type: 'answer', payload: answer });
+          // No argument: the browser creates the correct description type for
+          // the current state, which is what makes rollback-then-answer work.
+          await connection.setLocalDescription();
+          send({ type: 'answer', payload: connection.localDescription });
           break;
         }
 
         case 'answer':
           await connection.setRemoteDescription(new RTCSessionDescription(message.payload));
           await flushPendingCandidates(connection);
+          break;
+
+        case 'presentation-start':
+          // The presenter announces the stream id before the track arrives,
+          // so ontrack can route it to the screen tile rather than guessing.
+          screenStreamIdRef.current = message.payload?.stream_id ?? null;
+          setRemotePresenter(message.from ?? null);
+          break;
+
+        case 'presentation-stop':
+          screenStreamIdRef.current = null;
+          setRemoteScreenStream(null);
+          setRemotePresenter(null);
           break;
 
         case 'ice-candidate': {
@@ -304,5 +414,10 @@ export function useWebRTC({ meetingCode, localStream, enabled = true }) {
     hangUp,
     isConnected: connectionState === 'connected',
     replaceVideoTrack,
+    addScreenTrack,
+    removeScreenSender,
+    remoteScreenStream,
+    remotePresenter,
+    sendSignal: send,
   };
 }

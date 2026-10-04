@@ -358,3 +358,84 @@ def test_empty_speech_is_ignored(client, registered_user, second_user, meeting):
                 if speaker.receive_json().get("type") == "pong":
                     return
             pytest.fail("Empty speech disrupted the socket")
+
+
+# --------------------------------------------------------------------------- #
+# Presentation presence (Part B)
+# --------------------------------------------------------------------------- #
+
+
+def test_presentation_messages_are_relayed(client, registered_user, second_user, meeting):
+    """Presentation start/stop is PRESENCE, which this socket already carries.
+
+    The server still does not parse SDP, ICE, or anything about the screen —
+    it stamps the sender and forwards the payload, exactly as for an offer.
+    """
+    code = meeting["code"]
+
+    with client.websocket_connect(
+        f"/ws/signal/{code}?token={registered_user['access_token']}"
+    ) as presenter:
+        presenter.receive_json()
+
+        with client.websocket_connect(
+            f"/ws/signal/{code}?token={second_user['access_token']}"
+        ) as viewer:
+            viewer.receive_json()
+
+            presenter.send_json(
+                {"type": "presentation-start", "payload": {"stream_id": "stream-xyz"}}
+            )
+
+            for _ in range(5):
+                message = viewer.receive_json()
+                if message.get("type") == "presentation-start":
+                    # The stream id is what lets the receiver route the inbound
+                    # track to the screen tile instead of guessing from arrival
+                    # order, which is not guaranteed.
+                    assert message["payload"]["stream_id"] == "stream-xyz"
+                    assert message["from"]["name"] == "Swarna Rathna A"
+                    return
+            pytest.fail("presentation-start was not relayed")
+
+
+def test_presentation_stop_is_relayed(client, registered_user, second_user, meeting):
+    code = meeting["code"]
+
+    with client.websocket_connect(
+        f"/ws/signal/{code}?token={registered_user['access_token']}"
+    ) as presenter:
+        presenter.receive_json()
+
+        with client.websocket_connect(
+            f"/ws/signal/{code}?token={second_user['access_token']}"
+        ) as viewer:
+            viewer.receive_json()
+
+            presenter.send_json({"type": "presentation-stop", "payload": {}})
+
+            for _ in range(5):
+                if viewer.receive_json().get("type") == "presentation-stop":
+                    return
+            pytest.fail("presentation-stop was not relayed")
+
+
+def test_the_relay_vocabulary_is_still_closed(client, registered_user, meeting):
+    """Adding presentation types must not have opened the socket to anything.
+
+    Keeping this vocabulary closed is what stops the signalling channel
+    becoming an unvalidated message bus between participants.
+    """
+    code = meeting["code"]
+
+    with client.websocket_connect(
+        f"/ws/signal/{code}?token={registered_user['access_token']}"
+    ) as socket:
+        socket.receive_json()
+        socket.send_json({"type": "run-arbitrary-thing", "payload": {}})
+
+        for _ in range(4):
+            message = socket.receive_json()
+            if message.get("code") == "INVALID_MESSAGE":
+                return
+        pytest.fail("an unknown signalling type was accepted")

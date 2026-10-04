@@ -17,6 +17,7 @@ import { useAuth } from '../context/AuthContext';
 import { useCaptionStore } from '../hooks/useCaptionStore';
 import { useInterviewMode } from '../hooks/useInterviewMode';
 import { useSignCaptions } from '../hooks/useSignCaptions';
+import { useScreenShare } from '../hooks/useScreenShare';
 import { useSpeechCaptions } from '../hooks/useSpeechCaptions';
 import { useHandLandmarker } from '../hooks/useHandLandmarker';
 import { useSignSocket } from '../hooks/useSignSocket';
@@ -339,6 +340,36 @@ export default function MeetingRoom() {
     onCaption: emitCaption,
   });
 
+  // --- screen sharing ------------------------------------------------------
+  const screenShare = useScreenShare({
+    addScreenTrack,
+    removeScreenSender,
+    sendSignal,
+  });
+
+  const handlePresent = useCallback(async () => {
+    if (screenShare.isPresenting) {
+      screenShare.stopPresenting();
+      return;
+    }
+
+    // Someone else has the stage. Ask rather than silently taking it.
+    if (remotePresenter) {
+      const takeOver = window.confirm(
+        `${remotePresenter.name} is presenting. Take over presenting?`,
+      );
+      if (!takeOver) return;
+    }
+
+    // Opening the screen picker takes focus away from the page, which the
+    // interview-mode detector would otherwise record as a violation. The
+    // picker is the app's own dialog, so it is suppressed for its duration.
+    interview.suppressBriefly?.(4000);
+    await screenShare.startPresenting();
+  }, [screenShare, remotePresenter, interview]);
+
+  const someoneIsPresenting = screenShare.isPresenting || Boolean(remoteScreenStream);
+
   // --- keyboard shortcuts --------------------------------------------------
   // Ctrl/Cmd+D microphone, Ctrl/Cmd+E camera, C captions. Skipped while focus
   // is in a text field, or typing a meeting code would toggle the mic.
@@ -433,6 +464,11 @@ export default function MeetingRoom() {
     error: rtcError,
     hangUp,
     replaceVideoTrack,
+    addScreenTrack,
+    removeScreenSender,
+    remoteScreenStream,
+    remotePresenter,
+    sendSignal,
   } = useWebRTC({
     meetingCode: code,
     localStream,
@@ -631,7 +667,69 @@ export default function MeetingRoom() {
 
       <div className="grid flex-1 gap-4 lg:grid-cols-[minmax(0,1fr)_22rem]">
         <div className="flex flex-col gap-4">
-          <div className="grid gap-4 sm:grid-cols-2">
+          {/* --- presenter bar ------------------------------------------ */}
+          {screenShare.isPresenting && (
+            <div
+              className="flex items-center justify-between gap-3 rounded-xl border border-bridge-500/50 bg-bridge-500/15 px-4 py-2"
+              role="status"
+            >
+              <span className="text-sm font-medium text-bridge-400">
+                You are presenting to everyone
+              </span>
+              <button
+                type="button"
+                onClick={screenShare.stopPresenting}
+                className="rounded-full border border-signal-bad px-3 py-1 text-sm text-signal-bad hover:bg-signal-bad/10"
+              >
+                Stop presenting
+              </button>
+            </div>
+          )}
+
+          {screenShare.error && (
+            <p className="rounded-lg border border-signal-bad/40 bg-signal-bad/10 p-2 text-xs text-signal-bad" role="alert">
+              {screenShare.error}
+            </p>
+          )}
+
+          {/* --- the shared screen, when there is one --------------------- */}
+          {/* object-contain, never object-cover: cropping a shared screen
+              cuts off exactly the content someone is pointing at. */}
+          {someoneIsPresenting && (
+            <div className="relative flex-1 overflow-hidden rounded-xl border border-ink-700 bg-black">
+              <video
+                autoPlay
+                playsInline
+                muted
+                className="h-full w-full object-contain"
+                ref={(element) => {
+                  if (!element) return;
+                  const stream = screenShare.isPresenting
+                    ? screenShare.localScreenStream
+                    : remoteScreenStream;
+                  if (stream && element.srcObject !== stream) {
+                    element.srcObject = stream;
+                    element.play().catch(() => {});
+                  }
+                }}
+              />
+              <p className="absolute bottom-2 left-3 rounded bg-black/70 px-2 py-0.5 text-sm text-slate-100">
+                {screenShare.isPresenting
+                  ? 'Your screen'
+                  : `${remotePresenter?.name ?? 'Participant'}'s screen`}
+              </p>
+            </div>
+          )}
+
+          {/* Camera tiles: side by side normally, a narrow strip while
+              someone is presenting so the signer stays visible. */}
+          <div
+            className={
+              someoneIsPresenting
+                ? 'grid shrink-0 grid-cols-2 gap-3 lg:max-w-xs'
+                : 'grid gap-4 sm:grid-cols-2'
+            }
+          >
             <VideoTile
               videoRef={localVideoRef}
               stream={localStream}
@@ -719,6 +817,26 @@ export default function MeetingRoom() {
               }`}
             >
               🤟 Sign
+            </button>
+
+            <button
+              type="button"
+              onClick={handlePresent}
+              aria-pressed={screenShare.isPresenting}
+              title={
+                screenShare.isPresenting
+                  ? 'Stop presenting'
+                  : remotePresenter
+                    ? `${remotePresenter.name} is presenting — take over?`
+                    : 'Present your screen'
+              }
+              className={`rounded-full border px-4 py-2 text-sm ${
+                screenShare.isPresenting
+                  ? 'border-bridge-500 bg-bridge-500/20 text-bridge-400'
+                  : 'border-ink-700 hover:bg-ink-700'
+              }`}
+            >
+              {screenShare.isPresenting ? 'Stop presenting' : 'Present'}
             </button>
 
             {isHost && (
