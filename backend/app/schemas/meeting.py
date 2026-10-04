@@ -47,6 +47,11 @@ class MeetingPublic(BaseModel):
     title: str
     host: UserPublic
     is_interview_mode: bool
+    # When the mode was switched on, or null if it is off. The client needs
+    # this to show participants who join late that the mode is already active,
+    # and the host's violation view uses it to ignore focus events from before
+    # the mode started.
+    interview_mode_started_at: Optional[datetime] = None
     started_at: Optional[datetime] = None
     ended_at: Optional[datetime] = None
     created_at: datetime

@@ -4,7 +4,16 @@ import enum
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Index, String, func
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -48,6 +57,13 @@ class Meeting(Base):
     )
 
     is_interview_mode: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    # When the mode was switched on. Interview mode can be toggled DURING a
+    # meeting, so a focus event from before it started is not a violation —
+    # without this timestamp there is no way to tell the two apart.
+    interview_mode_started_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True
+    )
 
     # `started_at` is set when the first participant joins, not at creation —
     # a meeting created on Monday for Friday should not report a Monday start.
@@ -144,6 +160,12 @@ class FocusEvent(Base):
         ),
         nullable=False,
     )
+    # How long the participant was away, in milliseconds. Recorded on the
+    # 'return' row, because that is the first moment the duration is known.
+    # A 300 ms notification stealing focus and a two-minute absence are not the
+    # same event, and a log that cannot tell them apart is not worth keeping.
+    duration_away_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
         nullable=False,

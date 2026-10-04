@@ -10,7 +10,13 @@ from sqlalchemy.orm import Session, selectinload
 from app.core.deps import CurrentUser, DbSession
 from app.models.meeting import FocusEvent, FocusEventType, Meeting, MeetingParticipant
 from app.models.user import User
-from app.schemas.focus import FocusEventCreate, FocusEventPublic, FocusSummary
+from app.schemas.focus import (
+    FocusEventCreate,
+    FocusEventPublic,
+    FocusSummary,
+    InterviewModeUpdate,
+    ParticipantViolations,
+)
 from app.schemas.meeting import (
     MeetingCreate,
     MeetingDetail,
@@ -224,6 +230,56 @@ def leave_meeting(code: str, db: DbSession, current_user: CurrentUser) -> Meetin
     return _load_meeting_by_code(db, code)
 
 
+@router.patch(
+    "/{code}/interview-mode",
+    response_model=MeetingDetail,
+    summary="Switch Interview Mode on or off (host only)",
+)
+def set_interview_mode(
+    code: str, payload: InterviewModeUpdate, db: DbSession, current_user: CurrentUser
+) -> Meeting:
+    """Turn Interview Mode on or off during a meeting. Host only.
+
+    WHY THE STATE LIVES ON THE MEETING RECORD
+    -----------------------------------------
+    Not in browser state and not only in a WebSocket broadcast. A participant
+    who joins late, or reloads, or reconnects after a dropped socket must
+    arrive already knowing the mode is on — otherwise refreshing the page would
+    be a way to escape it, which makes the whole feature theatre.
+
+    The broadcast tells everyone who is *currently* connected; this row is what
+    tells everyone who connects *next*.
+
+    Host only, for the same reason only the host can end a meeting: this
+    changes what the other participants are subject to.
+    """
+    meeting = _load_meeting_by_code(db, code)
+
+    if meeting.host_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the meeting host can change Interview Mode",
+        )
+
+    if meeting.ended_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This meeting has ended",
+        )
+
+    meeting.is_interview_mode = payload.enabled
+    # Stamped on each switch-on, so focus events recorded earlier in the
+    # meeting are not counted as violations of a mode that was not yet active.
+    # Cleared on switch-off so a later switch-on gets a fresh window.
+    meeting.interview_mode_started_at = (
+        datetime.now(timezone.utc).replace(tzinfo=None) if payload.enabled else None
+    )
+
+    db.commit()
+    db.refresh(meeting)
+    return _load_meeting_by_code(db, code)
+
+
 @router.post(
     "/{code}/focus-events",
     response_model=FocusEventPublic,
@@ -258,6 +314,10 @@ def log_focus_event(
         meeting_id=meeting.id,
         user_id=current_user.id,
         event_type=payload.event_type,
+        # Only meaningful on a 'return'. The client owns this number because
+        # only the client saw the departure; the server cannot time an absence
+        # it was never told about.
+        duration_away_ms=payload.duration_away_ms,
     )
     db.add(event)
     db.commit()
@@ -269,6 +329,7 @@ def log_focus_event(
         user_id=event.user_id,
         user_name=current_user.name,
         event_type=event.event_type,
+        duration_away_ms=event.duration_away_ms,
         created_at=event.created_at,
     )
 
@@ -312,6 +373,38 @@ def get_focus_events(code: str, db: DbSession, current_user: CurrentUser) -> Foc
         for row in rows
     ]
 
+    # --- per-participant rollup -------------------------------------------
+    # Only events after the mode was switched on count. Without that filter a
+    # focus change from earlier in the meeting — when tab switching was
+    # perfectly allowed — would be reported as a violation.
+    started = meeting.interview_mode_started_at
+    per_user: dict[int, dict] = {}
+    for row in rows:
+        if started is not None and row.created_at < started:
+            continue
+        bucket = per_user.setdefault(
+            row.user_id,
+            {"user_name": row.user.name, "away_count": 0, "total": 0, "longest": 0},
+        )
+        if row.event_type.value in ("blur", "hidden"):
+            bucket["away_count"] += 1
+        if row.duration_away_ms:
+            bucket["total"] += row.duration_away_ms
+            bucket["longest"] = max(bucket["longest"], row.duration_away_ms)
+
+    by_participant = [
+        ParticipantViolations(
+            user_id=user_id,
+            user_name=data["user_name"],
+            away_count=data["away_count"],
+            total_away_ms=data["total"],
+            longest_away_ms=data["longest"],
+        )
+        for user_id, data in sorted(
+            per_user.items(), key=lambda kv: -kv[1]["away_count"]
+        )
+    ]
+
     return FocusSummary(
         meeting_id=meeting.id,
         total_events=len(events),
@@ -321,6 +414,7 @@ def get_focus_events(code: str, db: DbSession, current_user: CurrentUser) -> Foc
             1 for event in events if event.event_type != FocusEventType.RETURN
         ),
         events=events,
+        by_participant=by_participant,
     )
 
 

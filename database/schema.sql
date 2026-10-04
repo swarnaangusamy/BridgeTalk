@@ -69,6 +69,9 @@ CREATE TABLE IF NOT EXISTS meetings (
   title             VARCHAR(200) NOT NULL,
   host_id           INT          NOT NULL,
   is_interview_mode BOOLEAN      NOT NULL DEFAULT FALSE,
+  -- Interview mode can be switched on during a meeting, not only chosen at
+  -- creation. A focus event from before this timestamp is not a violation.
+  interview_mode_started_at DATETIME NULL,
   -- Set when the first participant joins, not at creation time: a meeting
   -- created on Monday for Friday must not report a Monday start.
   started_at        DATETIME     NULL,
@@ -151,10 +154,16 @@ CREATE TABLE IF NOT EXISTS focus_events (
   meeting_id INT NOT NULL,
   user_id    INT NOT NULL,
   event_type ENUM('blur','hidden','return') NOT NULL,
+  -- Set on 'return' rows only: the first moment the duration is known.
+  -- A 300ms notification steal and a two-minute absence must be
+  -- distinguishable, or the host's log is not worth reading.
+  duration_away_ms INT NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
   KEY ix_focus_meeting (meeting_id),
   KEY ix_focus_user (user_id),
+  -- The host's violation view counts events per participant.
+  KEY ix_focus_meeting_user (meeting_id, user_id),
 
   CONSTRAINT fk_focus_meeting
     FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE,
