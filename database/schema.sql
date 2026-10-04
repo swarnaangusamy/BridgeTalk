@@ -121,6 +121,14 @@ CREATE TABLE IF NOT EXISTS transcripts (
   id         INT AUTO_INCREMENT PRIMARY KEY,
   meeting_id INT   NOT NULL,
   user_id    INT   NOT NULL,
+  -- One utterance, one row. The producing client generates this and keeps it
+  -- stable for the whole utterance, so the UNIQUE index below makes a
+  -- duplicate write impossible rather than merely unlikely.
+  --
+  -- Captions used to be broadcast carrying the whole ACCUMULATED sentence,
+  -- with one row per emitted word, so a three-word utterance stored three rows
+  -- reading "a", "a b", "a b c". This column is what stopped that.
+  segment_id VARCHAR(64) NULL,
   -- Which of the two translation directions produced this line. Keeping them
   -- distinguishable is what lets the transcript panel label speakers, and
   -- what allows sign accuracy to be reported separately from speech accuracy.
@@ -136,6 +144,10 @@ CREATE TABLE IF NOT EXISTS transcripts (
   KEY ix_transcripts_user (user_id),
   -- Every read is "meeting X's lines in time order", so index the pair.
   KEY ix_transcript_meeting_created (meeting_id, created_at),
+  -- UNIQUE, not an ordinary index: a client retry or a reconnect replaying its
+  -- tail must collide instead of inserting a second copy. NULLs are exempt
+  -- from UNIQUE in MySQL, so rows predating this column do not conflict.
+  UNIQUE KEY uq_transcript_segment (meeting_id, segment_id),
 
   CONSTRAINT fk_transcripts_meeting
     FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE,

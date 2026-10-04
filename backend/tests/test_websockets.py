@@ -298,17 +298,29 @@ def test_speech_is_relayed_to_the_other_participant(
         ) as speaker:
             speaker.receive_json()
 
-            speaker.send_json({"type": "speech", "text": "Hello there", "is_final": True})
+            # The bespoke "speech" message type is gone. Sign and speech now
+            # share one `caption` event with a producer-generated segment_id —
+            # see test_captions.py and app/ws/captions.py for why.
+            speaker.send_json(
+                {
+                    "type": "caption",
+                    "segment_id": "seg-relay",
+                    "source": "speech",
+                    "text": "Hello there",
+                    "is_final": True,
+                }
+            )
 
-            for _ in range(4):
+            for _ in range(5):
                 message = listener.receive_json()
-                if message.get("type") == "subtitle":
+                if message.get("type") == "caption":
                     assert message["source"] == "speech"
                     assert message["text"] == "Hello there"
                     assert message["is_final"] is True
-                    assert message["from"]["name"] == "Thamizhthilaga S D S"
+                    assert message["speaker"]["name"] == "Thamizhthilaga S D S"
+                    assert message["segment_id"] == "seg-relay"
                     return
-            pytest.fail("Speech was not relayed")
+            pytest.fail("Speech caption was not relayed")
 
 
 def test_empty_speech_is_ignored(client, registered_user, second_user, meeting):
@@ -324,14 +336,25 @@ def test_empty_speech_is_ignored(client, registered_user, second_user, meeting):
             f"/ws/predict/{code}?token={second_user['access_token']}"
         ) as speaker:
             speaker.receive_json()
-            speaker.send_json({"type": "speech", "text": "   ", "is_final": True})
+            speaker.send_json(
+                {
+                    "type": "caption",
+                    "segment_id": "seg-empty",
+                    "source": "speech",
+                    "text": "   ",
+                    "is_final": True,
+                }
+            )
 
             # The ping proves the connection survived the empty speech and that
             # nothing was broadcast in between. Drained in a loop because the
             # server also emits a MODEL_NOT_LOADED frame on connect when no
             # model is present, which is the case under test.
             speaker.send_json({"type": "ping"})
-            for _ in range(4):
+            # Whitespace is still broadcast as an event — it is simply never
+            # persisted (test_captions.py pins that). So the drain has to read
+            # past the caption echo as well as the connect-time model warning.
+            for _ in range(6):
                 if speaker.receive_json().get("type") == "pong":
                     return
             pytest.fail("Empty speech disrupted the socket")

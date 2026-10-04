@@ -55,6 +55,10 @@ def _to_public(transcript: Transcript) -> TranscriptPublic:
         meeting_id=transcript.meeting_id,
         user_id=transcript.user_id,
         user_name=transcript.user.name,
+        # Was missing: the column is written but was never serialised, so a
+        # client could not tell which utterance a row belonged to and the
+        # idempotency key was invisible from outside the database.
+        segment_id=transcript.segment_id,
         source=transcript.source,
         content=transcript.content,
         confidence=transcript.confidence,

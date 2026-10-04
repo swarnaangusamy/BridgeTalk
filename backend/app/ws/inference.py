@@ -46,6 +46,11 @@ from app.ml.predictor import (
 )
 from app.ml.sequence import SequenceBuffer
 from app.ml.smoothing import NEUTRAL_LABEL, PredictionSmoother, SmoothingConfig
+from app.ws.captions import (
+    build_caption_event,
+    persist_final_caption,
+    validate_caption,
+)
 from app.models.meeting import Meeting
 from app.models.user import User
 from app.ws.connection_manager import inference_manager
@@ -451,25 +456,54 @@ async def predict_socket(
             # signalling one because this is the meeting's *text* channel —
             # both translation directions belong together, and a dropped video
             # call must not take the captions down with it.
-            if message_type == "speech":
-                text = (message.get("text") or "").strip()
-                if not text:
+            # --- captions, from EITHER source -----------------------------
+            # One handler for sign and speech. They used to travel two
+            # different ways, which is how the sign path ended up broadcasting
+            # the whole accumulated sentence while speech sent only the phrase.
+            if message_type == "caption":
+                problem = validate_caption(message)
+                if problem:
+                    await inference_manager.send_personal(
+                        connection, _error("INVALID_MESSAGE", problem)
+                    )
                     continue
 
-                await inference_manager.broadcast(
-                    normalized_code,
-                    {
-                        "type": "subtitle",
-                        "from": {"id": user.id, "name": user.name},
-                        "source": "speech",
-                        "text": text,
-                        # Interim results update the live subtitle but must not
-                        # be written to the transcript — the browser revises
-                        # them word by word as it hears more.
-                        "is_final": bool(message.get("is_final", False)),
-                    },
-                    exclude=connection,
+                is_final = bool(message.get("is_final", False))
+                event = build_caption_event(
+                    meeting_code=normalized_code,
+                    segment_id=message["segment_id"],
+                    speaker_id=user.id,
+                    speaker_name=user.name,
+                    source=message["source"],
+                    text=message["text"],
+                    is_final=is_final,
+                    confidence=message.get("confidence"),
                 )
+
+                # Broadcast to EVERYONE, sender included. Excluding the sender
+                # meant each participant assembled their caption list from a
+                # different code path — local state for their own words, the
+                # socket for the other person's — and the two disagreed. Now
+                # there is one source of truth for both sides.
+                await inference_manager.broadcast(normalized_code, event)
+
+                # Persist once, on the final event, keyed by segment_id. The
+                # DEMO code is not a real meeting, so nothing is stored for it.
+                if is_final and normalized_code != "DEMO":
+                    with SessionLocal() as session:
+                        meeting = session.scalar(
+                            select(Meeting).where(Meeting.code == normalized_code)
+                        )
+                        if meeting is not None:
+                            persist_final_caption(
+                                session,
+                                meeting_id=meeting.id,
+                                user_id=user.id,
+                                segment_id=message["segment_id"],
+                                source=message["source"],
+                                text=message["text"],
+                                confidence=message.get("confidence"),
+                            )
                 continue
 
             if message_type != "landmarks":
@@ -524,32 +558,19 @@ async def predict_socket(
 
             result = result_message.pop("_result")
             await inference_manager.send_personal(connection, result_message)
-
-            # --- broadcast to the other participant ------------------------
-            # Only accepted letters are broadcast, never per-frame flicker, so
-            # the other person's subtitle updates when something was actually
-            # recognised rather than 10 times a second.
+            # NOTE: this loop no longer broadcasts anything.
             #
-            # `result` is None while the dynamic buffer is still filling — those
-            # frames produced no prediction at all, so there is nothing to send.
-            if result is not None and result.emitted is not None and normalized_code != "DEMO":
-                await inference_manager.broadcast(
-                    normalized_code,
-                    {
-                        "type": "subtitle",
-                        "from": {"id": user.id, "name": user.name},
-                        "source": "sign",
-                        # Which model produced this, so the transcript can
-                        # record that a word came from Model B — whose accuracy
-                        # is materially lower — rather than presenting both
-                        # sources as equally reliable.
-                        "mode": active_mode,
-                        "text": result.sentence,
-                        "emitted": result.emitted,
-                        "confidence": round(result.confidence, 4),
-                    },
-                    exclude=connection,
-                )
+            # It used to send `result.sentence` — the whole ACCUMULATED
+            # sentence — as the caption text, which is why captions grew
+            # without bound and the transcript stored the same sentence
+            # over and over with one more word each time.
+            #
+            # The client now owns segmentation: it receives the per-frame
+            # prediction above, decides where an utterance starts and ends,
+            # and sends a `caption` message carrying a segment_id. Keeping
+            # that decision in one place is the point — it was previously
+            # split between a Python smoother and a JavaScript buffer that
+            # each held half of it and disagreed.
 
     except WebSocketDisconnect:
         # Normal: the tab closed or the user left the meeting.
