@@ -251,3 +251,33 @@ velocity and there is no recorded idle-webcam fixture to replay through it.
 Acceptance check A6.4 — hands resting for 30 seconds — is the manual test that
 covers it, and it needs a human at a camera.
 
+---
+
+## Parts A and B complete — Part C (interface rebuild) NOT started
+
+### The seven reported problems: root cause and fix
+
+| # | Root cause | Fix |
+|---|---|---|
+| 1 | Whisper decoded each MediaRecorder fragment independently. Only the first carries the WebM init segment, so fragments 2+ decoded to **zero samples**. The server got 250 ms of audio then silence forever; the VAD discarded it as too short. Nothing logged, because "no audio in this chunk" looks identical to "quiet chunk" | `StreamDecoder` keeps the stream and decodes it whole, feeding forward only new samples. Also: engine default is now **Auto** (browser engine first) — Whisper was defaulting in Chrome and only emits on pause |
+| 2 | The socket broadcast `result.sentence` — the **accumulated** sentence — as caption text, and a 2.5 s cooldown was the only repeat guard, so a held pose re-committed every time it lapsed | One caption event carrying only that segment's text; `useSignCaptions` commits once per **movement** segment and refuses to repeat until hands return to rest |
+| 3 | Same accumulated-sentence broadcast, persisted once per emitted word → rows reading "a", "a b", "a b c" | One row per `segment_id`, written on the final event, with a **UNIQUE** DB constraint so a retry collides instead of duplicating |
+| 4 | `track.enabled = false` keeps the camera open; the detection loop early-returned on `!cameraOn` **without clearing `landmarks`**, so the last skeleton stayed in React state over a black tile | Camera off now **stops** the track and releases the device; `replaceTrack` keeps the peer in sync; the overlay is cleared with it |
+| 5 | `signDetectionOn` defaulted to **true** for every participant | Opt-in, defaults off, and gated on the camera being on |
+| 6 | The lobby put `deviceId` in the join URL — a stable hardware identifier in a link users are told to share, plus history and Referer | `sessionStorage`, which also survives the reload the URL was for, and expires with the tab |
+| 7 | Recognition was gated on display toggles inside panel components | Producing is automatic (mic unmuted / camera on). The captions button controls display only. Recognition moved to meeting-level hooks |
+
+### Status
+
+| Part | State |
+|---|---|
+| A — caption pipeline | **Done**, transport verified live |
+| B — screen sharing | **Done**, signalling verified live; media path needs two browsers |
+| C — interface rebuild (8 pages) | **Not started** |
+| D — final verification | Blocked on C |
+
+Part C is a full visual rebuild — design system, 8 pages, Material Symbols,
+slide-in panels, Settings dialog. The meeting page's permanent right-hand panel
+is already removed and the caption area and control bar are in place; the rest
+is unstyled.
+
