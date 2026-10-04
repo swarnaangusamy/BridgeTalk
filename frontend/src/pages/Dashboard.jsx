@@ -46,7 +46,8 @@ export default function Dashboard() {
       // Check the meeting exists before navigating, so a typo produces a clear
       // message here rather than a room that fails to load.
       await meetingsApi.get(code);
-      navigate(`/meeting/${encodeURIComponent(code)}`);
+      // Via the lobby, so devices are chosen and permission granted first.
+      navigate(`/lobby/${encodeURIComponent(code)}`);
     } catch (cause) {
       setError(cause.message);
     } finally {
@@ -125,7 +126,7 @@ export default function Dashboard() {
               <p className="my-2 font-mono text-3xl font-bold tracking-widest text-bridge-400">
                 {created.code}
               </p>
-              <Link to={`/meeting/${created.code}`} className="btn-primary inline-block">
+              <Link to={`/lobby/${created.code}`} className="btn-primary inline-block">
                 Enter the meeting
               </Link>
             </div>

@@ -4,6 +4,7 @@ import ErrorBoundary from './components/ErrorBoundary';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import Dashboard from './pages/Dashboard';
 import History from './pages/History';
+import Lobby from './pages/Lobby';
 import Login from './pages/Login';
 import MeetingDetail from './pages/MeetingDetail';
 import MeetingRoom from './pages/MeetingRoom';
@@ -49,6 +50,10 @@ export default function App() {
           <Route path="/" element={<RequireAuth><Dashboard /></RequireAuth>} />
           <Route path="/history" element={<RequireAuth><History /></RequireAuth>} />
           <Route path="/history/:code" element={<RequireAuth><MeetingDetail /></RequireAuth>} />
+          {/* The lobby is the front door: it grants camera/mic permission in a
+              calm screen rather than mid-interview, where the prompt could be
+              counted as a focus violation. */}
+          <Route path="/lobby/:code" element={<RequireAuth><Lobby /></RequireAuth>} />
           <Route path="/meeting/:code" element={<RequireAuth><MeetingRoom /></RequireAuth>} />
           {/* The standalone sign-detection screen from Phase 5. It stays
               because it is the quickest way to check the model is working

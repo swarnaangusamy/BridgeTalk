@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 
 import HandOverlayCanvas from '../components/HandOverlayCanvas';
 import ModeSwitch from '../components/ModeSwitch';
@@ -34,14 +34,15 @@ import { toWireFormat } from '../utils/landmarkUtils';
  * fail outright because the device is already open.
  */
 
-const SEND_INTERVAL_MS = 100;
+const SEND_INTERVAL_MS = 100; // 10 FPS to the inference socket
 
 // Violations before the host is prompted to remove the participant.
 // Configurable here rather than scattered through the UI.
-const MAX_VIOLATIONS = 3; // 10 FPS to the inference socket
+const MAX_VIOLATIONS = 3;
 
 export default function MeetingRoom() {
   const { code } = useParams();
+  const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const { user } = useAuth();
 
@@ -115,14 +116,48 @@ export default function MeetingRoom() {
 
     async function startMedia() {
       try {
+        // Devices chosen in the lobby arrive as query parameters, so a reload
+        // inside the meeting keeps them instead of silently reverting to the
+        // system default. `exact` is used deliberately: without it the browser
+        // treats the id as a preference and may hand back a different camera,
+        // which would make the lobby's selector a lie.
+        const chosenCamera = searchParams.get('camera');
+        const chosenMic = searchParams.get('mic');
+
         stream = await navigator.mediaDevices.getUserMedia({
-          video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' },
-          audio: true,
+          video: chosenCamera
+            ? { deviceId: { exact: chosenCamera }, width: { ideal: 640 }, height: { ideal: 480 } }
+            : { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' },
+          audio: chosenMic
+            ? {
+                deviceId: { exact: chosenMic },
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true,
+              }
+            : { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
         });
         if (cancelled) {
           stream.getTracks().forEach((track) => track.stop());
           return;
         }
+
+        // The lobby may have been left with the camera or mic muted. Carry
+        // that through rather than surprising someone with a live camera they
+        // had deliberately switched off a moment earlier.
+        if (searchParams.get('cameraOff') === '1') {
+          stream.getVideoTracks().forEach((track) => {
+            track.enabled = false;
+          });
+          setCameraOn(false);
+        }
+        if (searchParams.get('micOff') === '1') {
+          stream.getAudioTracks().forEach((track) => {
+            track.enabled = false;
+          });
+          setMicOn(false);
+        }
+
         setLocalStream(stream);
       } catch (error) {
         if (cancelled) return;
