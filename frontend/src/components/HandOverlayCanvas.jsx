@@ -31,7 +31,20 @@ export default function HandOverlayCanvas({ landmarks, mirrored = true, stable =
     const canvas = canvasRef.current;
     if (!canvas) return;
 
+    // getContext CAN return null, and this used to assume it could not.
+    //
+    // It is null in jsdom, which is how the render tests found this — but it is
+    // also null in a real browser when the GPU context has been lost: a driver
+    // reset, or a backgrounded tab reclaimed under memory pressure on mobile.
+    // Dereferencing it threw during the commit phase, which React escalates to
+    // the nearest error boundary, so a lost canvas context took the ENTIRE
+    // meeting screen down — camera, captions and all — to render a skeleton.
+    //
+    // The overlay is decoration over the video. Losing it must cost the overlay
+    // and nothing else.
     const context = canvas.getContext('2d');
+    if (!context) return;
+
     const { width, height } = canvas;
 
     context.clearRect(0, 0, width, height);
@@ -40,7 +53,10 @@ export default function HandOverlayCanvas({ landmarks, mirrored = true, stable =
     // Green once the prediction is stable, blue while still settling. The
     // colour change is peripheral feedback: you can tell recognition has
     // locked on without looking away from your own hand.
-    const strokeColour = stable ? 'rgba(74, 222, 128, 0.95)' : 'rgba(56, 189, 248, 0.95)';
+    // #81C995 once stable, #8AB4F8 while settling — the same green and accent
+    // the rest of the dark interface uses, so the overlay does not introduce a
+    // third blue.
+    const strokeColour = stable ? 'rgba(129, 201, 149, 0.95)' : 'rgba(138, 180, 248, 0.95)';
 
     for (const hand of landmarks) {
       // MediaPipe returns normalised [0,1] coordinates. The preview is

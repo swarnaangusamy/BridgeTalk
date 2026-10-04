@@ -21,37 +21,37 @@ export default function InterviewModeOverlay({
 
   return (
     <div
-      className="fixed inset-0 z-40 flex items-center justify-center bg-signal-bad/15 backdrop-blur-md p-6"
+      className="fixed inset-0 z-40 flex items-center justify-center bg-dark-danger/15 backdrop-blur-md p-6"
       role="alertdialog"
       aria-modal="true"
       aria-labelledby="interview-overlay-title"
     >
-      <div className="max-w-md rounded-2xl border border-signal-bad/60 bg-ink-800 p-6 text-center shadow-2xl">
+      <div className="max-w-md rounded-2xl border border-dark-danger/60 bg-dark-raised p-6 text-center shadow-2xl">
         <h2
           id="interview-overlay-title"
-          className="text-2xl font-bold text-signal-bad"
+          className="text-2xl font-bold text-dark-danger"
         >
           You left the meeting tab
         </h2>
 
-        <p className="mt-3 text-sm text-slate-200">
+        <p className="mt-3 text-sm text-dark-text">
           Interview mode is on. This has been recorded and the host has been
           notified.
         </p>
 
-        <p className="mt-2 text-sm text-slate-300">
+        <p className="mt-2 text-sm text-dark-muted">
           Times recorded: <strong className="tabular-nums text-lg">{awayCount}</strong>
           {remaining > 0 ? (
             <>
               {' '}
-              · <span className="text-slate-400">
+              · <span className="text-dark-muted">
                 {remaining} more before the host is prompted to remove you
               </span>
             </>
           ) : (
             <>
               {' '}
-              · <span className="text-signal-bad">
+              · <span className="text-dark-danger">
                 the host has been prompted to remove you
               </span>
             </>
@@ -59,7 +59,7 @@ export default function InterviewModeOverlay({
         </p>
 
         {!isFullscreen && (
-          <p className="mt-3 text-xs text-slate-400">
+          <p className="mt-3 text-xs text-dark-muted">
             The meeting must be fullscreen to continue. Re-entering fullscreen
             needs a click, so the browser will not do it on its own.
           </p>

@@ -1,0 +1,235 @@
+import { useRef, useState } from 'react';
+
+import { useClock } from '../../hooks/useClock';
+import { formatClockTime } from '../../utils/formatters';
+import Icon from '../ui/Icon';
+import IconButton from '../ui/IconButton';
+import { Menu, MenuDivider, MenuItem } from '../ui/Menu';
+
+/**
+ * The 80px bar at the bottom of the meeting, in three zones.
+ *
+ * Left: the time and the meeting code. Centre: the six round buttons and the
+ * leave pill. Right: the three buttons that open the side panels.
+ *
+ * WHY THE CENTRE IS ABSOLUTELY POSITIONED
+ * ---------------------------------------
+ * The three zones are not equal widths — the left shows a clock and a code, the
+ * right three icons — so a flexbox `justify-between` would leave the centre
+ * group off-centre, and it would SHIFT as the code or the clock changed width.
+ * The controls are the thing the eye returns to, so they are pinned to the true
+ * centre of the bar and the side zones are laid out around them.
+ *
+ * On a narrow screen the pinning is dropped and the bar becomes a simple
+ * centred row, because at that width there is no room for three zones and the
+ * controls matter more than the clock.
+ */
+export default function ControlBar({
+  micOn,
+  cameraOn,
+  captionsOn,
+  signOn,
+  signAvailable,
+  signModelsKnown,
+  isPresenting,
+  someoneElseIsPresenting,
+  openPanel,
+  isHost,
+  interviewOn,
+  meetingCode,
+  onToggleMic,
+  onToggleCamera,
+  onToggleCaptions,
+  onToggleSign,
+  onPresent,
+  onOpenPanel,
+  onOpenSettings,
+  onToggleFullscreen,
+  onToggleInterviewMode,
+  onLeave,
+  onEndForEveryone,
+}) {
+  const now = useClock();
+  const [moreOpen, setMoreOpen] = useState(false);
+  const [leaveOpen, setLeaveOpen] = useState(false);
+  const barRef = useRef(null);
+
+  return (
+    <footer
+      ref={barRef}
+      className="on-dark relative flex h-controlbar shrink-0 items-center justify-center
+                 gap-2 bg-dark-bg px-4 sm:justify-between"
+    >
+      {/* ------------------------------- left ---------------------------- */}
+      <div className="hidden items-center gap-3 text-sm text-dark-muted sm:flex">
+        <span>{formatClockTime(now)}</span>
+        <span aria-hidden="true" className="text-dark-surface">|</span>
+        <span className="font-mono">{meetingCode}</span>
+      </div>
+
+      {/* ------------------------------ centre --------------------------- */}
+      <div className="flex items-center gap-2 sm:absolute sm:left-1/2 sm:-translate-x-1/2">
+        <IconButton
+          icon={micOn ? 'mic' : 'mic_off'}
+          label={micOn ? 'Turn off microphone' : 'Turn on microphone'}
+          shortcut="Ctrl+D"
+          onClick={onToggleMic}
+          danger={!micOn}
+        />
+        <IconButton
+          icon={cameraOn ? 'videocam' : 'videocam_off'}
+          label={cameraOn ? 'Turn off camera' : 'Turn on camera'}
+          shortcut="Ctrl+E"
+          onClick={onToggleCamera}
+          danger={!cameraOn}
+        />
+        <IconButton
+          icon="closed_caption"
+          label={captionsOn ? 'Hide captions' : 'Show captions'}
+          shortcut="C"
+          onClick={onToggleCaptions}
+          active={captionsOn}
+        />
+        <IconButton
+          icon="sign_language"
+          // THREE states, not two. "Not loaded" and "not yet known" are
+          // different things, and conflating them meant the button accused the
+          // server of having no model during the fraction of a second before
+          // the socket had reported — which is alarming and untrue.
+          label={
+            !cameraOn
+              ? 'Turn on your camera to sign'
+              : !signModelsKnown
+                ? 'Connecting to sign recognition…'
+                : !signAvailable
+                  ? 'No sign recognition model is loaded'
+                  : signOn
+                    ? 'Turn off sign recognition'
+                    : 'Turn on sign recognition'
+          }
+          onClick={onToggleSign}
+          active={signOn}
+          // Disabled with an explanatory tooltip rather than hidden: a signer
+          // whose camera is off needs to know the button exists and why it
+          // cannot be used.
+          disabled={!cameraOn || !signAvailable}
+        />
+        <IconButton
+          icon={isPresenting ? 'cancel_presentation' : 'present_to_all'}
+          label={
+            isPresenting
+              ? 'Stop presenting'
+              : someoneElseIsPresenting
+                ? 'Take over presenting'
+                : 'Present your screen'
+          }
+          onClick={onPresent}
+          active={isPresenting}
+        />
+
+        <div className="relative">
+          <IconButton
+            icon="more_vert"
+            label="More options"
+            onClick={() => setMoreOpen((open) => !open)}
+            active={moreOpen}
+            aria-haspopup="menu"
+            aria-expanded={moreOpen}
+          />
+          <Menu
+            open={moreOpen}
+            onClose={() => setMoreOpen(false)}
+            className="bottom-full mb-3 min-w-[260px]"
+          >
+            <MenuItem icon="settings" onClick={() => { setMoreOpen(false); onOpenSettings(); }}>
+              Settings
+            </MenuItem>
+            <MenuItem icon="fullscreen" onClick={() => { setMoreOpen(false); onToggleFullscreen(); }}>
+              Full screen
+            </MenuItem>
+            {isHost ? (
+              <>
+                <MenuDivider />
+                <MenuItem
+                  icon="policy"
+                  onClick={() => { setMoreOpen(false); onToggleInterviewMode(); }}
+                  description={
+                    interviewOn
+                      ? 'Stop recording when people leave the tab'
+                      : 'Record when people leave the meeting tab'
+                  }
+                >
+                  {interviewOn ? 'Turn off interview mode' : 'Turn on interview mode'}
+                </MenuItem>
+              </>
+            ) : null}
+          </Menu>
+        </div>
+
+        {/* Leave. The host gets a choice, because "end for everyone" is
+            destructive and must never be one click away from "leave". */}
+        <div className="relative ml-1">
+          <button
+            type="button"
+            onClick={() => (isHost ? setLeaveOpen((open) => !open) : onLeave())}
+            aria-label="Leave call"
+            aria-haspopup={isHost ? 'menu' : undefined}
+            aria-expanded={isHost ? leaveOpen : undefined}
+            className="grid h-12 place-items-center rounded-full bg-dark-danger px-6
+                       text-white transition hover:brightness-110"
+          >
+            <Icon name="call_end" size={24} />
+          </button>
+
+          {isHost ? (
+            <Menu
+              open={leaveOpen}
+              onClose={() => setLeaveOpen(false)}
+              className="bottom-full mb-3 min-w-[260px]"
+            >
+              <MenuItem icon="logout" onClick={() => { setLeaveOpen(false); onLeave(); }}>
+                Just leave the meeting
+              </MenuItem>
+              <MenuItem
+                icon="call_end"
+                destructive
+                onClick={() => { setLeaveOpen(false); onEndForEveryone(); }}
+                description="Nobody will be able to rejoin"
+              >
+                End meeting for everyone
+              </MenuItem>
+            </Menu>
+          ) : null}
+        </div>
+      </div>
+
+      {/* ------------------------------ right ---------------------------- */}
+      <div className="hidden items-center gap-1 sm:flex">
+        <IconButton
+          icon="info"
+          label="Meeting details"
+          size={44}
+          iconSize={22}
+          active={openPanel === 'details'}
+          onClick={() => onOpenPanel('details')}
+        />
+        <IconButton
+          icon="group"
+          label="People"
+          size={44}
+          iconSize={22}
+          active={openPanel === 'people'}
+          onClick={() => onOpenPanel('people')}
+        />
+        <IconButton
+          icon="description"
+          label="Transcript"
+          size={44}
+          iconSize={22}
+          active={openPanel === 'transcript'}
+          onClick={() => onOpenPanel('transcript')}
+        />
+      </div>
+    </footer>
+  );
+}

@@ -24,18 +24,18 @@ const STATUS_LABELS = {
 };
 
 const STATUS_STYLES = {
-  idle: 'text-slate-400',
-  connecting: 'text-signal-warn',
-  open: 'text-signal-ok',
-  reconnecting: 'text-signal-warn',
-  closed: 'text-signal-bad',
-  error: 'text-signal-bad',
+  idle: 'text-light-muted',
+  connecting: 'text-[#E37400]',
+  open: 'text-[#1E8E3E]',
+  reconnecting: 'text-[#E37400]',
+  closed: 'text-light-danger',
+  error: 'text-light-danger',
 };
 
 function confidenceColour(value, stable) {
-  if (stable) return 'bg-signal-ok';
-  if (value >= 0.5) return 'bg-bridge-500';
-  return 'bg-signal-warn';
+  if (stable) return 'bg-[#1E8E3E]';
+  if (value >= 0.5) return 'bg-light-blue';
+  return 'bg-[#E37400]';
 }
 
 export default function SignDetectionPanel({
@@ -71,12 +71,12 @@ export default function SignDetectionPanel({
   const needsBothHands = mode === 'isl' && prediction?.hands_seen === 1;
 
   return (
-    <section className="panel flex flex-col gap-5" aria-labelledby="sign-detection-heading">
+    <section className="card p-6 flex flex-col gap-5" aria-labelledby="sign-detection-heading">
       <header className="flex items-baseline justify-between gap-4">
         <h2 id="sign-detection-heading" className="text-xl font-semibold">
           Sign detection
         </h2>
-        <span className={`text-sm font-medium ${STATUS_STYLES[status] ?? 'text-slate-400'}`}
+        <span className={`text-sm font-medium ${STATUS_STYLES[status] ?? 'text-light-muted'}`}
               role="status" aria-live="polite">
           {STATUS_LABELS[status] ?? status}
         </span>
@@ -84,7 +84,7 @@ export default function SignDetectionPanel({
 
       {/* --- server-side problems ------------------------------------- */}
       {serverError && (
-        <p className="rounded-lg border border-signal-bad/40 bg-signal-bad/10 p-3 text-sm text-signal-bad"
+        <p className="rounded-lg border border-light-danger/40 bg-light-danger/10 p-3 text-sm text-light-danger"
            role="alert">
           <strong className="font-semibold">{serverError.code}</strong>
           {': '}
@@ -108,7 +108,7 @@ export default function SignDetectionPanel({
         <div className="flex items-center gap-4">
           <span
             className={`min-w-[3.5rem] text-center text-5xl font-bold tabular-nums ${
-              stable ? 'text-signal-ok' : 'text-bridge-400'
+              stable ? 'text-[#1E8E3E]' : 'text-light-blue'
             }`}
             aria-hidden="true"
           >
@@ -117,7 +117,7 @@ export default function SignDetectionPanel({
 
           <div className="flex-1">
             <div
-              className="h-6 w-full overflow-hidden rounded-full bg-ink-900"
+              className="h-6 w-full overflow-hidden rounded-full bg-light-surface"
               role="progressbar"
               aria-valuenow={Math.round(confidence * 100)}
               aria-valuemin={0}
@@ -130,7 +130,7 @@ export default function SignDetectionPanel({
               />
             </div>
 
-            <p className="mt-1 flex justify-between text-sm text-slate-300">
+            <p className="mt-1 flex justify-between text-sm text-light-muted">
               <span>
                 {buffering ? (
                   <>
@@ -138,7 +138,7 @@ export default function SignDetectionPanel({
                   </>
                 ) : showingLetter ? (
                   <>
-                    Detecting <strong className="text-slate-100">{label}</strong> at{' '}
+                    Detecting <strong className="text-light-text">{label}</strong> at{' '}
                     {(confidence * 100).toFixed(0)}%{stable ? ' — locked on' : ' — settling'}
                   </>
                 ) : (
@@ -146,12 +146,12 @@ export default function SignDetectionPanel({
                 )}
               </span>
               {latency != null && (
-                <span className="tabular-nums text-slate-400">{latency} ms</span>
+                <span className="tabular-nums text-light-muted">{latency} ms</span>
               )}
             </p>
 
             {needsBothHands && (
-              <p className="mt-1 text-xs text-signal-warn" role="status" aria-live="polite">
+              <p className="mt-1 text-xs text-[#E37400]" role="status" aria-live="polite">
                 Only one hand visible — most ISL letters need both.
               </p>
             )}
@@ -162,23 +162,23 @@ export default function SignDetectionPanel({
       {/* --- accumulated sentence -------------------------------------- */}
       <div>
         <div className="mb-2 flex items-center justify-between">
-          <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-400">
+          <h3 className="text-sm font-semibold uppercase tracking-wide text-light-muted">
             Recognised text
           </h3>
           <div className="flex gap-2">
             <button type="button" onClick={onBackspace}
-                    className="rounded-md border border-ink-700 px-3 py-1 text-sm hover:bg-ink-700">
+                    className="rounded-md border border-light-border px-3 py-1 text-sm hover:bg-light-surface">
               Backspace
             </button>
             <button type="button" onClick={onClear}
-                    className="rounded-md border border-ink-700 px-3 py-1 text-sm hover:bg-ink-700">
+                    className="rounded-md border border-light-border px-3 py-1 text-sm hover:bg-light-surface">
               Clear
             </button>
           </div>
         </div>
 
         <p
-          className="min-h-[4rem] break-words rounded-lg bg-ink-900 p-4 text-subtitle text-slate-100"
+          className="min-h-[4rem] break-words rounded-lg bg-light-surface p-4 text-subtitle text-light-text"
           // polite rather than assertive: new letters should be announced,
           // but must not interrupt whatever the screen reader is already
           // saying mid-conversation.
@@ -186,14 +186,14 @@ export default function SignDetectionPanel({
           aria-atomic="false"
         >
           {sentence || (
-            <span className="text-slate-500">Sign a {unitNoun} to begin…</span>
+            <span className="text-light-muted">Sign a {unitNoun} to begin…</span>
           )}
         </p>
       </div>
 
       {/* --- model provenance ------------------------------------------ */}
       {modelInfo && (
-        <footer className="border-t border-ink-700 pt-3 text-xs text-slate-400">
+        <footer className="border-t border-light-border pt-3 text-xs text-light-muted">
           {modelInfo.loaded ? (
             <>
               Model loaded · {modelInfo.classes} classes · validation accuracy{' '}

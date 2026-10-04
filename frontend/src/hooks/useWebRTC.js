@@ -135,12 +135,26 @@ export function useWebRTC({ meetingCode, localStream, enabled = true }) {
     }
   }, []);
 
-  const replaceVideoTrack = useCallback(async (track) => {
+  /**
+   * Swap the track a sender is transmitting, without renegotiating.
+   *
+   * `replaceTrack` is the whole reason toggling the camera or changing a device
+   * mid-call is instant. Removing the track and adding a new one would fire
+   * `onnegotiationneeded` and cost a full offer/answer round trip, during which
+   * the other side sees the video freeze.
+   *
+   * The `track === null` fallback finds a sender whose track has already been
+   * cleared — which is the state after the camera was turned off. Without it,
+   * turning the camera back on would find no video sender and silently fail to
+   * reach the peer: locally correct, remotely still black.
+   */
+  const replaceTrackOfKind = useCallback(async (kind, track) => {
     const connection = peerRef.current;
     if (!connection) return false;
 
-    const sender = connection.getSenders().find((s) => s.track?.kind === 'video')
-      ?? connection.getSenders().find((s) => s.track === null);
+    const senders = connection.getSenders();
+    const sender =
+      senders.find((s) => s.track?.kind === kind) ?? senders.find((s) => s.track === null);
     if (!sender) return false;
 
     try {
@@ -148,10 +162,28 @@ export function useWebRTC({ meetingCode, localStream, enabled = true }) {
       return true;
     } catch {
       // Older browsers, or a sender in a state that refuses the swap. The
-      // local camera state is still correct; only the remote view is stale.
+      // local state is still correct; only the remote view is stale.
       return false;
     }
   }, []);
+
+  const replaceVideoTrack = useCallback(
+    (track) => replaceTrackOfKind('video', track),
+    [replaceTrackOfKind],
+  );
+
+  /**
+   * Used when the microphone is changed in Settings.
+   *
+   * Without this, choosing a different microphone mid-call would change which
+   * device feeds speech recognition — which runs locally — while the other
+   * participant kept hearing the old one. Captions and audio would come from
+   * two different microphones, which is a genuinely confusing failure.
+   */
+  const replaceAudioTrack = useCallback(
+    (track) => replaceTrackOfKind('audio', track),
+    [replaceTrackOfKind],
+  );
   const socketRef = useRef(null);
   // ICE candidates can arrive before the remote description is set, and
   // addIceCandidate throws if it does. They are queued here and flushed once
@@ -414,6 +446,7 @@ export function useWebRTC({ meetingCode, localStream, enabled = true }) {
     hangUp,
     isConnected: connectionState === 'connected',
     replaceVideoTrack,
+    replaceAudioTrack,
     addScreenTrack,
     removeScreenSender,
     remoteScreenStream,

@@ -23,24 +23,24 @@ export default function InterviewModeDialog({ hostName, capabilities, onAcknowle
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-ink-900/95 p-6"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-dark-bg/95 p-6"
       role="alertdialog"
       aria-modal="true"
       aria-labelledby="interview-dialog-title"
       aria-describedby="interview-dialog-body"
     >
-      <div className="max-w-lg rounded-2xl border border-signal-warn/50 bg-ink-800 p-6 shadow-2xl">
+      <div className="max-w-lg rounded-2xl border border-[#FDD663] bg-dark-raised p-6 shadow-2xl">
         <h2
           id="interview-dialog-title"
-          className="text-2xl font-bold text-slate-50"
+          className="text-2xl font-bold text-dark-text"
         >
           Interview mode is on
         </h2>
-        <p className="mt-1 text-sm text-slate-400">
+        <p className="mt-1 text-sm text-dark-muted">
           {hostName ? `Switched on by ${hostName}.` : 'Switched on by the host.'}
         </p>
 
-        <div id="interview-dialog-body" className="mt-4 space-y-3 text-sm text-slate-200">
+        <div id="interview-dialog-body" className="mt-4 space-y-3 text-sm text-dark-text">
           <p>While interview mode is on:</p>
           <ul className="list-disc space-y-1.5 pl-5">
             <li>This meeting will go <strong>fullscreen</strong>.</li>
@@ -58,8 +58,8 @@ export default function InterviewModeDialog({ hostName, capabilities, onAcknowle
 
           {/* Say plainly what this cannot do. Overstating it is the fastest
               way to lose a participant's trust — and an examiner's. */}
-          <p className="rounded-lg border border-ink-700 bg-ink-900 p-3 text-xs text-slate-400">
-            <strong className="text-slate-300">What this cannot do:</strong> a web
+          <p className="rounded-lg border border-dark-surface bg-dark-bg p-3 text-xs text-dark-muted">
+            <strong className="text-dark-muted">What this cannot do:</strong> a web
             page cannot truly stop you leaving, and this does not watch your
             room, your phone, or a second screen. It records when this tab loses
             focus. It is a deterrent, not surveillance.
@@ -67,7 +67,7 @@ export default function InterviewModeDialog({ hostName, capabilities, onAcknowle
 
           {reduced && (
             <p
-              className="rounded-lg border border-signal-warn/40 bg-signal-warn/10 p-3 text-xs text-slate-200"
+              className="rounded-lg border border-[#FDD663] bg-[#FDD663] p-3 text-xs text-dark-text"
               role="status"
             >
               <strong>Reduced enforcement in this browser.</strong>{' '}
@@ -79,7 +79,7 @@ export default function InterviewModeDialog({ hostName, capabilities, onAcknowle
             </p>
           )}
 
-          <p className="text-xs text-slate-400">
+          <p className="text-xs text-dark-muted">
             Sign and speech captions work exactly as normal.
           </p>
         </div>

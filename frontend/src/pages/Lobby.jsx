@@ -1,27 +1,41 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 
+import {
+  Avatar,
+  ErrorState,
+  Icon,
+  IconButton,
+  LoadingState,
+  Logo,
+  Select,
+  Spinner,
+} from '../components/ui';
 import { useAuth } from '../context/AuthContext';
 import { useMediaDevices } from '../hooks/useMediaDevices';
-import { saveDevicePreferences } from '../services/devicePreferences';
+import { useMicLevel } from '../hooks/useMicLevel';
 import { meetings as meetingsApi } from '../services/api';
+import { loadDevicePreferences, saveDevicePreferences } from '../services/devicePreferences';
 
 /**
- * Pre-join lobby: see yourself, pick your devices, then enter.
+ * The screen before the meeting: check your camera and microphone, decide
+ * whether you will be signing, then join.
  *
- * WHY THIS SCREEN EXISTS AT ALL
- * -----------------------------
- * Two reasons, and the second is specific to this project:
+ * WHY THE LOBBY EXISTS AT ALL
+ * ---------------------------
+ * The browser's camera and microphone prompt has to happen somewhere. Doing it
+ * on the meeting page means the prompt appears over a live call — and in an
+ * interview-mode meeting, the prompt itself takes focus from the page, which
+ * the focus monitor would record as the candidate leaving the tab. The lobby
+ * moves that moment somewhere calm and consequence-free.
  *
- *   1. Nobody wants to discover their camera is off, or pointed at the
- *      ceiling, in front of an interviewer.
- *   2. **Interview mode requires camera and microphone permission before it
- *      can start.** Granting permission here, in a calm screen with an
- *      explanation, avoids a permission prompt appearing mid-interview and
- *      being counted as a focus violation.
- *
- * It also warms up the slow parts — getUserMedia and the device list — before
- * the meeting room has to do anything time-sensitive.
+ * ONE STREAM, HANDED FORWARD
+ * --------------------------
+ * The preview stream is NOT stopped on the way to the meeting. It is acquired
+ * here, and the meeting page acquires its own; stopping and immediately
+ * re-opening the camera produces a visible half-second of black and, on some
+ * webcams, an audible iris click. What IS stopped is the stream when the user
+ * navigates away without joining.
  */
 export default function Lobby() {
   const { code } = useParams();
@@ -32,308 +46,546 @@ export default function Lobby() {
   const streamRef = useRef(null);
 
   const [meeting, setMeeting] = useState(null);
-  const [error, setError] = useState(null);
-  const [status, setStatus] = useState('starting'); // starting|ready|denied|error
-  const [cameraOn, setCameraOn] = useState(true);
+  const [meetingError, setMeetingError] = useState(null);
+
+  const [stream, setStream] = useState(null);
+  const [permissionError, setPermissionError] = useState(null);
+  const [acquiring, setAcquiring] = useState(true);
+
   const [micOn, setMicOn] = useState(true);
-  const [cameraId, setCameraId] = useState('');
-  const [microphoneId, setMicrophoneId] = useState('');
+  const [cameraOn, setCameraOn] = useState(true);
   const [joining, setJoining] = useState(false);
 
-  const devices = useMediaDevices({ enabled: true });
+  // Restored from session storage, so a reload inside the lobby — the thing the
+  // old query-parameter version existed for — keeps the user's choices.
+  const saved = useRef(loadDevicePreferences()).current;
+  const [micId, setMicId] = useState(saved?.micId ?? '');
+  const [cameraId, setCameraId] = useState(saved?.cameraId ?? '');
+  const [speakerId, setSpeakerId] = useState(saved?.speakerId ?? '');
 
-  // --- meeting details -----------------------------------------------------
+  // Pre-ticked for someone whose account says they mostly sign, so a deaf
+  // participant does not have to find a toggle before they can be understood.
+  const [willSign, setWillSign] = useState(() => saved?.willSign ?? user?.role === 'deaf');
+
+  const { cameras, microphones, speakers, refresh } = useMediaDevices({ enabled: true });
+  const micLevel = useMicLevel(stream, { enabled: micOn });
+
+  // ----------------------------------------------------------- the meeting --
+
   useEffect(() => {
     let cancelled = false;
     meetingsApi
       .get(code)
-      .then((found) => !cancelled && setMeeting(found))
-      .catch((cause) => !cancelled && setError(cause.message ?? 'Meeting not found'));
+      .then((found) => {
+        if (!cancelled) setMeeting(found);
+      })
+      .catch((cause) => {
+        if (!cancelled) setMeetingError(cause?.message ?? 'Could not find that meeting');
+      });
     return () => {
       cancelled = true;
     };
   }, [code]);
 
-  // --- preview stream ------------------------------------------------------
-  const startPreview = useCallback(async () => {
-    // Stop the previous stream before opening another, or the camera light
-    // stays on for an orphaned track and some devices refuse the second open.
-    streamRef.current?.getTracks().forEach((track) => track.stop());
+  // ------------------------------------------------------------ the camera --
 
-    setStatus('starting');
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: cameraId ? { deviceId: { exact: cameraId } } : true,
-        audio: microphoneId
-          ? {
-              deviceId: { exact: microphoneId },
-              echoCancellation: true,
-              noiseSuppression: true,
-              autoGainControl: true,
-            }
-          : { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-      });
+  const acquire = useCallback(
+    async ({ withMic, withCamera, preferredMic, preferredCamera }) => {
+      setAcquiring(true);
+      setPermissionError(null);
 
-      streamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play().catch(() => {});
-      }
-      setStatus('ready');
-      // Labels are only populated once permission has been granted, so the
-      // device list is re-read now rather than at mount.
-      devices.refresh();
-    } catch (cause) {
-      if (cause?.name === 'NotAllowedError' || cause?.name === 'SecurityError') {
-        setStatus('denied');
-        setError(
-          'Camera and microphone permission was denied. Click the camera icon ' +
-            'in your browser’s address bar, allow access, then reload.',
-        );
-      } else if (cause?.name === 'NotFoundError') {
-        setStatus('error');
-        setError('No camera or microphone found. Is one connected?');
-      } else if (cause?.name === 'NotReadableError') {
-        setStatus('error');
-        setError(
-          'Your camera is in use by another application. Close Zoom, Teams or ' +
-            'Photo Booth and try again.',
-        );
-      } else {
-        setStatus('error');
-        setError(`Could not start the camera: ${cause?.message ?? cause}`);
-      }
-    }
-    // devices.refresh is stable; listing it would restart the preview on every
-    // device change, which is exactly what we do not want mid-lobby.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cameraId, microphoneId]);
-
-  useEffect(() => {
-    startPreview();
-  }, [startPreview]);
-
-  // Release the camera when leaving the lobby. Without this the indicator
-  // light stays on after navigating into the meeting, which looks like the app
-  // is recording two streams.
-  useEffect(
-    () => () => {
+      // Stop the previous stream first. Two live streams on the same camera is
+      // a NotReadableError on Windows, and the old one would keep the indicator
+      // light on regardless.
       streamRef.current?.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
+      setStream(null);
+
+      if (!withMic && !withCamera) {
+        setAcquiring(false);
+        return;
+      }
+
+      try {
+        const next = await navigator.mediaDevices.getUserMedia({
+          video: withCamera
+            ? {
+                ...(preferredCamera ? { deviceId: { exact: preferredCamera } } : {}),
+                width: { ideal: 640 },
+                height: { ideal: 480 },
+                facingMode: 'user',
+              }
+            : false,
+          // Echo cancellation and noise suppression are requested here, not
+          // only in the meeting: speech recognition runs on this microphone,
+          // and the remote participant's voice coming back through it is
+          // transcribed as if this user had said it.
+          audio: withMic
+            ? {
+                ...(preferredMic ? { deviceId: { exact: preferredMic } } : {}),
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true,
+              }
+            : false,
+        });
+
+        streamRef.current = next;
+        setStream(next);
+        // Labels are empty until permission has been granted once, so the
+        // device list is worth re-reading now that it has been.
+        refresh();
+      } catch (cause) {
+        setPermissionError(describeMediaError(cause));
+      } finally {
+        setAcquiring(false);
+      }
+    },
+    [refresh],
+  );
+
+  // First acquisition. Runs once; later changes go through the handlers, which
+  // know whether the camera, the microphone or a device id changed.
+  useEffect(() => {
+    acquire({ withMic: true, withCamera: true, preferredMic: micId, preferredCamera: cameraId });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- mount only
+  }, []);
+
+  // Stop the camera when LEAVING the lobby without joining.
+  //
+  // `joining` is read through a ref rather than being a dependency: as a
+  // dependency it would re-run this cleanup the moment Join was pressed, which
+  // is exactly when the stream must survive.
+  const joiningRef = useRef(false);
+  joiningRef.current = joining;
+  useEffect(
+    () => () => {
+      if (!joiningRef.current) {
+        streamRef.current?.getTracks().forEach((track) => track.stop());
+      }
     },
     [],
   );
 
-  // --- toggles apply to the live preview ----------------------------------
+  // Attach the stream to the <video>. Separate from acquisition because the
+  // element does not exist on the first render when the preview is hidden.
   useEffect(() => {
-    streamRef.current?.getVideoTracks().forEach((track) => {
-      track.enabled = cameraOn;
+    const element = videoRef.current;
+    if (!element) return;
+    if (element.srcObject !== stream) element.srcObject = stream ?? null;
+    if (stream) element.play().catch(() => {
+      // Autoplay can reject before the first user gesture. The preview is
+      // muted, so this effectively never happens, and a still frame is a
+      // survivable outcome if it does.
     });
-  }, [cameraOn, status]);
+  }, [stream]);
 
+  // Route preview audio to the chosen speaker where the browser allows it.
   useEffect(() => {
+    const element = videoRef.current;
+    if (!element?.setSinkId || !speakerId) return;
+    element.setSinkId(speakerId).catch(() => {
+      // Chromium-only, and it rejects for a device that has gone away. The
+      // choice is still saved and handed to the meeting.
+    });
+  }, [speakerId, stream]);
+
+  // --------------------------------------------------------------- actions --
+
+  function toggleMic() {
+    const next = !micOn;
+    setMicOn(next);
+    // Enable/disable rather than re-acquire: the track stays open, so the level
+    // meter resumes instantly instead of waiting on getUserMedia.
+    streamRef.current?.getAudioTracks().forEach((track) => {
+      track.enabled = next;
+    });
+  }
+
+  async function toggleCamera() {
+    const next = !cameraOn;
+    setCameraOn(next);
+    // Camera off genuinely RELEASES the device here, as it does in the meeting:
+    // the indicator light must go out, or the preview is lying about the state
+    // of the user's hardware.
+    await acquire({
+      withMic: true,
+      withCamera: next,
+      preferredMic: micId,
+      preferredCamera: cameraId,
+    });
+    if (!next) return;
     streamRef.current?.getAudioTracks().forEach((track) => {
       track.enabled = micOn;
     });
-  }, [micOn, status]);
+  }
 
-  const join = useCallback(async () => {
+  async function changeMic(value) {
+    setMicId(value);
+    await acquire({
+      withMic: true,
+      withCamera: cameraOn,
+      preferredMic: value,
+      preferredCamera: cameraId,
+    });
+  }
+
+  async function changeCamera(value) {
+    setCameraId(value);
+    await acquire({
+      withMic: true,
+      withCamera: cameraOn,
+      preferredMic: micId,
+      preferredCamera: value,
+    });
+  }
+
+  async function join() {
     setJoining(true);
+    // Saved BEFORE navigating: the meeting page reads these on mount, so a save
+    // afterwards would race with it and the first meeting would use defaults.
+    saveDevicePreferences({ micId, cameraId, speakerId, willSign, micOn, cameraOn });
+
     try {
       await meetingsApi.join(code);
-
-      // Device choices go to SESSION STORAGE, never the URL.
-      //
-      // A deviceId is a stable hardware identifier. Putting it in the join URL
-      // meant it was copied into chat messages, kept in browser history, and
-      // sent in Referer headers — a fingerprintable detail about the user's
-      // machine leaking out of a link they were encouraged to share.
-      //
-      // Session storage also survives a reload inside the meeting, which is
-      // the behaviour the URL was there for, and is cleared when the tab
-      // closes, which is the right lifetime for "devices for this meeting".
-      saveDevicePreferences({
-        cameraId,
-        microphoneId,
-        cameraOn,
-        micOn,
-      });
-
-      navigate(`/meeting/${encodeURIComponent(code)}`);
+      navigate(`/meeting/${code}`);
     } catch (cause) {
+      setMeetingError(cause?.message ?? 'Could not join this meeting');
       setJoining(false);
-      setError(cause.message ?? 'Could not join this meeting');
     }
-  }, [code, cameraId, microphoneId, cameraOn, micOn, navigate]);
+  }
+
+  // ---------------------------------------------------------------- render --
+
+  if (meetingError && !meeting) {
+    return (
+      <main className="grid min-h-screen place-items-center bg-light-bg p-6">
+        <div className="w-full max-w-lg">
+          <div className="mb-8 flex justify-center">
+            <Logo to="/" />
+          </div>
+          <ErrorState
+            title="This meeting is not available"
+            body={meetingError}
+            onRetry={() => navigate('/')}
+            retryLabel="Back to home"
+          />
+        </div>
+      </main>
+    );
+  }
+
+  const others = (meeting?.participants ?? []).filter(
+    (participant) => participant.user?.id !== user?.id && !participant.left_at,
+  );
 
   return (
-    <main className="mx-auto max-w-4xl p-6">
-      <header className="mb-6">
-        <h1 className="text-3xl font-bold tracking-tight">Ready to join?</h1>
-        <p className="mt-1 text-sm text-slate-400">
-          <span className="font-mono">{code}</span>
-          {meeting?.title && <> · {meeting.title}</>}
-          {meeting?.host?.name && <> · hosted by {meeting.host.name}</>}
-        </p>
+    <div className="min-h-screen bg-light-bg">
+      {/* No account menu here, only the logo — the specification is explicit. */}
+      <header className="flex h-topbar items-center px-4 sm:px-6">
+        <Logo to="/" />
       </header>
 
-      {meeting?.is_interview_mode && (
-        <p
-          className="mb-4 rounded-lg border border-signal-warn/50 bg-signal-warn/10 p-3 text-sm text-slate-100"
-          role="status"
-        >
-          <strong>Interview mode is on for this meeting.</strong> When you join,
-          the meeting will go fullscreen and leaving the tab will be detected,
-          reported to the host, and recorded. Allowing camera and microphone
-          access here means you will not get a permission prompt mid-interview.
-        </p>
-      )}
+      <main className="mx-auto max-w-6xl px-4 pb-16 sm:px-6">
+        <div className="grid items-center gap-8 py-6 lg:grid-cols-[minmax(0,6fr)_minmax(0,4fr)] lg:gap-12 lg:py-12">
+          {/* ------------------------- left: preview ---------------------- */}
+          <section>
+            {permissionError ? (
+              <PermissionHelp
+                error={permissionError}
+                onRetry={() =>
+                  acquire({
+                    withMic: true,
+                    withCamera: cameraOn,
+                    preferredMic: micId,
+                    preferredCamera: cameraId,
+                  })
+                }
+              />
+            ) : (
+              <div className="relative aspect-video w-full overflow-hidden rounded-tile bg-[#202124]">
+                {/* The preview is mirrored, which is what every video tool does
+                    for your own image: an unmirrored self-view feels wrong
+                    because it is not what a mirror shows you. */}
+                <video
+                  ref={videoRef}
+                  autoPlay
+                  playsInline
+                  muted
+                  className={`h-full w-full scale-x-[-1] object-cover transition-opacity
+                              ${cameraOn && stream ? 'opacity-100' : 'opacity-0'}`}
+                />
 
-      {error && (
-        <p
-          className="mb-4 rounded-lg border border-signal-bad/40 bg-signal-bad/10 p-3 text-sm text-signal-bad"
-          role="alert"
-        >
-          {error}
-        </p>
-      )}
+                {!cameraOn || !stream ? (
+                  <div className="absolute inset-0 grid place-items-center gap-3">
+                    {acquiring ? (
+                      <Spinner size={28} className="border-white/20 border-t-white" />
+                    ) : (
+                      <>
+                        <Avatar name={user?.name ?? ''} size={72} />
+                        <p className="text-sm text-dark-muted">Camera is off</p>
+                      </>
+                    )}
+                  </div>
+                ) : null}
 
-      <div className="grid gap-6 md:grid-cols-[minmax(0,1fr)_20rem]">
-        {/* --- preview --------------------------------------------------- */}
-        <section aria-labelledby="preview-heading">
-          <h2 id="preview-heading" className="sr-only">
-            Camera preview
-          </h2>
-          <div className="relative overflow-hidden rounded-xl border border-ink-700 bg-ink-900">
-            <video
-              ref={videoRef}
-              autoPlay
-              playsInline
-              muted
-              // Mirrored, because an un-mirrored self-view feels wrong to
-              // everyone — it is the convention in every video tool.
-              className="aspect-video w-full scale-x-[-1] object-cover"
-            />
-
-            {status === 'starting' && (
-              <p className="absolute inset-0 flex items-center justify-center text-slate-400" role="status">
-                Starting your camera…
-              </p>
-            )}
-            {!cameraOn && status === 'ready' && (
-              <p className="absolute inset-0 flex items-center justify-center bg-ink-900/90 text-slate-300">
-                Camera is off
-              </p>
-            )}
-            {(status === 'denied' || status === 'error') && (
-              <div className="absolute inset-0 flex items-center justify-center p-6 text-center">
-                <p className="text-sm text-slate-300">
-                  No preview available. You can still join — the meeting will
-                  ask again.
+                {/* Name, top-left of the preview */}
+                <p className="absolute left-3 top-3 max-w-[60%] truncate rounded bg-black/40 px-2 py-1 text-sm text-dark-text">
+                  {user?.name}
                 </p>
+
+                {/* Live microphone level, bottom-left */}
+                <div className="absolute bottom-4 left-3 flex items-center gap-2">
+                  <Icon
+                    name={micOn ? 'mic' : 'mic_off'}
+                    size={18}
+                    className={micOn ? 'text-dark-text' : 'text-dark-danger'}
+                  />
+                  <span
+                    role="meter"
+                    aria-label="Microphone level"
+                    aria-valuenow={Math.round(micLevel * 100)}
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    className="flex h-4 items-end gap-[3px]"
+                  >
+                    {[0.15, 0.35, 0.55, 0.75, 0.92].map((threshold, index) => (
+                      <span
+                        key={threshold}
+                        className={`w-[3px] rounded-sm transition-colors duration-75
+                          ${micOn && micLevel >= threshold ? 'bg-dark-accent' : 'bg-white/25'}`}
+                        style={{ height: `${6 + index * 2.5}px` }}
+                      />
+                    ))}
+                  </span>
+                </div>
+
+                {/* Mic and camera toggles, bottom centre */}
+                <div className="on-dark absolute bottom-4 left-1/2 flex -translate-x-1/2 gap-3">
+                  <IconButton
+                    icon={micOn ? 'mic' : 'mic_off'}
+                    label={micOn ? 'Turn off microphone' : 'Turn on microphone'}
+                    onClick={toggleMic}
+                    danger={!micOn}
+                    size={44}
+                    iconSize={20}
+                  />
+                  <IconButton
+                    icon={cameraOn ? 'videocam' : 'videocam_off'}
+                    label={cameraOn ? 'Turn off camera' : 'Turn on camera'}
+                    onClick={toggleCamera}
+                    danger={!cameraOn}
+                    disabled={acquiring}
+                    size={44}
+                    iconSize={20}
+                  />
+                </div>
               </div>
             )}
 
-            <p className="absolute bottom-2 left-3 rounded bg-ink-900/80 px-2 py-0.5 text-sm text-slate-200">
-              {user?.name ?? 'You'}
-            </p>
-          </div>
-
-          <div className="mt-3 flex flex-wrap gap-2">
-            <button
-              type="button"
-              onClick={() => setCameraOn((value) => !value)}
-              aria-pressed={cameraOn}
-              className="rounded-lg border border-ink-700 px-3 py-2 text-sm hover:bg-ink-700"
-            >
-              {cameraOn ? 'Turn camera off' : 'Turn camera on'}
-            </button>
-            <button
-              type="button"
-              onClick={() => setMicOn((value) => !value)}
-              aria-pressed={micOn}
-              className="rounded-lg border border-ink-700 px-3 py-2 text-sm hover:bg-ink-700"
-            >
-              {micOn ? 'Mute microphone' : 'Unmute microphone'}
-            </button>
-          </div>
-        </section>
-
-        {/* --- devices + join ------------------------------------------- */}
-        <aside className="flex flex-col gap-4">
-          <section className="panel" aria-labelledby="devices-heading">
-            <h2
-              id="devices-heading"
-              className="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-400"
-            >
-              Devices
-            </h2>
-
-            {devices.permission !== 'granted' && (
-              <p className="mb-3 text-xs text-slate-400">
-                Device names appear once you allow camera access — browsers hide
-                them until then, so a site you have never permitted cannot learn
-                what hardware you own.
-              </p>
-            )}
-
-            <label className="mb-3 block text-xs text-slate-400">
-              Camera
-              <select
+            {/* Device pickers */}
+            <div className="mt-4 grid gap-3 sm:grid-cols-3">
+              <Select
+                label="Microphone"
+                icon="mic"
+                value={micId}
+                onChange={changeMic}
+                options={toOptions(microphones, 'Microphone')}
+              />
+              {/* Hidden when the browser exposes no output devices — Firefox and
+                  Safari do not, and setSinkId is Chromium-only, so the control
+                  would be decoration there. */}
+              {speakers.length > 0 ? (
+                <Select
+                  label="Speaker"
+                  icon="volume_up"
+                  value={speakerId}
+                  onChange={setSpeakerId}
+                  options={toOptions(speakers, 'Speaker')}
+                />
+              ) : (
+                <div className="hidden sm:block" aria-hidden="true" />
+              )}
+              <Select
+                label="Camera"
+                icon="videocam"
                 value={cameraId}
-                onChange={(event) => setCameraId(event.target.value)}
-                className="mt-1 w-full rounded-md border border-ink-700 bg-ink-900 px-2 py-1.5 text-sm text-slate-100"
-              >
-                <option value="">System default</option>
-                {devices.cameras.map((device, index) => (
-                  <option key={device.deviceId || index} value={device.deviceId}>
-                    {device.label || `Camera ${index + 1}`}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label className="block text-xs text-slate-400">
-              Microphone
-              <select
-                value={microphoneId}
-                onChange={(event) => setMicrophoneId(event.target.value)}
-                className="mt-1 w-full rounded-md border border-ink-700 bg-ink-900 px-2 py-1.5 text-sm text-slate-100"
-              >
-                <option value="">System default</option>
-                {devices.microphones.map((device, index) => (
-                  <option key={device.deviceId || index} value={device.deviceId}>
-                    {device.label || `Microphone ${index + 1}`}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            {devices.error && (
-              <p className="mt-2 text-xs text-signal-bad" role="alert">
-                {devices.error}
-              </p>
-            )}
+                onChange={changeCamera}
+                options={toOptions(cameras, 'Camera')}
+              />
+            </div>
           </section>
 
-          <button
-            type="button"
-            onClick={join}
-            disabled={joining}
-            className="btn-primary w-full disabled:opacity-60"
-          >
-            {joining ? 'Joining…' : 'Join meeting'}
-          </button>
+          {/* ------------------------- right: join ------------------------ */}
+          <section className="lg:pl-4">
+            {!meeting ? (
+              <LoadingState message="Loading the meeting…" />
+            ) : (
+              <>
+                <h1 className="text-2xl font-normal text-light-text">Ready to join?</h1>
+                <p className="mt-2 text-sm text-light-muted">
+                  {meeting.title}
+                </p>
+                <p className="mt-0.5 font-mono text-sm text-light-muted">{code}</p>
 
-          <button
-            type="button"
-            onClick={() => navigate('/')}
-            className="rounded-lg border border-ink-700 px-3 py-2 text-sm hover:bg-ink-700"
-          >
-            Cancel
-          </button>
-        </aside>
+                <div className="mt-5 flex items-center gap-2">
+                  {others.length === 0 ? (
+                    <p className="text-sm text-light-muted">No one else is here</p>
+                  ) : (
+                    <>
+                      <div className="flex items-center">
+                        {others.slice(0, 4).map((participant, index) => (
+                          <span
+                            key={participant.id}
+                            className="-ml-1.5 rounded-full ring-2 ring-light-bg first:ml-0"
+                            style={{ zIndex: 4 - index }}
+                          >
+                            <Avatar name={participant.user?.name ?? ''} size={28} />
+                          </span>
+                        ))}
+                      </div>
+                      <p className="text-sm text-light-muted">
+                        {others.length === 1
+                          ? `${others[0].user?.name} is in this call`
+                          : `${others.length} people are in this call`}
+                      </p>
+                    </>
+                  )}
+                </div>
+
+                {meeting.is_interview_mode ? (
+                  <p className="mt-5 flex items-start gap-2 rounded-card bg-light-surface p-3 text-sm text-light-muted">
+                    <Icon name="policy" size={18} className="mt-px shrink-0" />
+                    <span>
+                      Interview mode is on for this meeting. Leaving the meeting
+                      tab will be recorded and shown to the host.
+                    </span>
+                  </p>
+                ) : null}
+
+                <label className="mt-6 flex cursor-pointer items-start gap-3">
+                  <input
+                    type="checkbox"
+                    checked={willSign}
+                    onChange={(event) => setWillSign(event.target.checked)}
+                    className="mt-0.5 h-5 w-5 shrink-0 cursor-pointer accent-light-blue"
+                  />
+                  <span>
+                    <span className="block text-sm font-medium text-light-text">
+                      I will be signing in this meeting
+                    </span>
+                    <span className="mt-0.5 block text-xs text-light-muted">
+                      Turns on sign recognition when you join, so your signs
+                      become captions for everyone. You can change this during
+                      the meeting.
+                    </span>
+                  </span>
+                </label>
+
+                {meetingError ? (
+                  <p role="alert" className="mt-4 text-sm text-light-danger">
+                    {meetingError}
+                  </p>
+                ) : null}
+
+                <div className="mt-7 flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={join}
+                    disabled={joining}
+                    className="btn-primary h-12 px-7"
+                  >
+                    {joining ? (
+                      <Spinner size={16} className="border-white/40 border-t-white" />
+                    ) : null}
+                    Join now
+                  </button>
+                  <Link to="/" className="btn-text">
+                    Back to home
+                  </Link>
+                </div>
+              </>
+            )}
+          </section>
+        </div>
+      </main>
+    </div>
+  );
+}
+
+/** Device list to Select options, with a readable fallback for unlabelled ones. */
+function toOptions(devices, kind) {
+  return devices.map((device, index) => ({
+    value: device.deviceId,
+    label: device.label || `${kind} ${index + 1}`,
+  }));
+}
+
+/**
+ * Turn a getUserMedia rejection into something a user can act on.
+ *
+ * The browser's own messages are written for developers — "Could not start
+ * video source" tells someone nothing about what to do next. The distinction
+ * that matters is denied-by-choice versus device-in-use-elsewhere, because the
+ * fixes are completely different.
+ */
+function describeMediaError(cause) {
+  const name = cause?.name ?? '';
+
+  if (name === 'NotAllowedError' || name === 'SecurityError') {
+    return {
+      title: 'BridgeTalk needs your camera and microphone',
+      steps: [
+        'Click the camera or lock icon in your browser address bar.',
+        'Set Camera and Microphone to Allow for this site.',
+        'Then choose Try again below.',
+      ],
+    };
+  }
+
+  if (name === 'NotFoundError' || name === 'OverconstrainedError') {
+    return {
+      title: 'No camera or microphone was found',
+      steps: [
+        'Check that your camera and microphone are plugged in.',
+        'If you have just connected one, choose Try again.',
+      ],
+    };
+  }
+
+  if (name === 'NotReadableError' || name === 'AbortError') {
+    return {
+      title: 'Your camera is being used by another app',
+      steps: [
+        'Close any other app using the camera — another meeting tab, Zoom, or Photo Booth.',
+        'Then choose Try again.',
+      ],
+    };
+  }
+
+  return {
+    title: 'Could not start your camera and microphone',
+    steps: [cause?.message ?? 'An unknown error occurred.', 'Choose Try again to retry.'],
+  };
+}
+
+function PermissionHelp({ error, onRetry }) {
+  return (
+    <div className="grid aspect-video w-full place-items-center rounded-tile border border-light-border bg-light-surface p-6">
+      <div className="max-w-sm text-center">
+        <span aria-hidden="true" className="text-light-muted">
+          <Icon name="videocam_off" size={36} />
+        </span>
+        <h2 className="mt-3 text-base font-medium text-light-text">{error.title}</h2>
+        <ol className="mt-3 list-decimal space-y-1 pl-5 text-left text-sm text-light-muted">
+          {error.steps.map((step) => (
+            <li key={step}>{step}</li>
+          ))}
+        </ol>
+        <button type="button" onClick={onRetry} className="btn-primary mt-5">
+          Try again
+        </button>
       </div>
-    </main>
+    </div>
   );
 }

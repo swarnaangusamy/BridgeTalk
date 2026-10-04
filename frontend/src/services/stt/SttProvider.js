@@ -12,7 +12,7 @@
  *                chunk-based, so it produces FINALS ONLY — there is no such
  *                thing as a partial result to show.
  *
- * Hiding that behind one interface is what lets `useSpeechToText` and the
+ * Hiding that behind one interface is what lets `useSpeechCaptions` and the
  * caption bar stay identical regardless of which is running. The one
  * difference a component genuinely must handle is declared explicitly as
  * `providesInterim`, rather than being discovered when partial text never

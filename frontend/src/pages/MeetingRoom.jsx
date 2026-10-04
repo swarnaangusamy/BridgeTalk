@@ -1,63 +1,79 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 
+import DebugOverlay from '../components/DebugOverlay';
 import HandOverlayCanvas from '../components/HandOverlayCanvas';
-import {
-  CaptionSizeControl,
-  CopyLinkButton,
-  MeetingTimer,
-  useCaptionSize,
-} from '../components/MeetingHeaderControls';
 import InterviewModeDialog from '../components/InterviewModeDialog';
 import InterviewModeOverlay from '../components/InterviewModeOverlay';
-import CaptionArea from '../components/CaptionArea';
-import DebugOverlay from '../components/DebugOverlay';
-import VideoTile from '../components/VideoTile';
+import CaptionRail from '../components/meeting/CaptionRail';
+import ControlBar from '../components/meeting/ControlBar';
+import DetailsPanel from '../components/meeting/DetailsPanel';
+import LiveTranscriptPanel from '../components/meeting/LiveTranscriptPanel';
+import PeoplePanel from '../components/meeting/PeoplePanel';
+import SettingsDialog from '../components/meeting/SettingsDialog';
+import SidePanel from '../components/meeting/SidePanel';
+import Stage from '../components/meeting/Stage';
+import { Icon, useToast } from '../components/ui';
 import { useAuth } from '../context/AuthContext';
 import { useCaptionStore } from '../hooks/useCaptionStore';
-import { useInterviewMode } from '../hooks/useInterviewMode';
-import { useSignCaptions } from '../hooks/useSignCaptions';
-import { useScreenShare } from '../hooks/useScreenShare';
-import { useSpeechCaptions } from '../hooks/useSpeechCaptions';
 import { useHandLandmarker } from '../hooks/useHandLandmarker';
+import { useInterviewMode } from '../hooks/useInterviewMode';
+import { useMediaDevices } from '../hooks/useMediaDevices';
+import { useMeetingPreferences } from '../hooks/useMeetingPreferences';
+import { useScreenShare } from '../hooks/useScreenShare';
+import { useSignCaptions } from '../hooks/useSignCaptions';
 import { useSignSocket } from '../hooks/useSignSocket';
+import { useSpeechCaptions } from '../hooks/useSpeechCaptions';
 import { useWebRTC } from '../hooks/useWebRTC';
-import { loadDevicePreferences } from '../services/devicePreferences';
 import { meetings as meetingsApi, transcripts as transcriptsApi } from '../services/api';
+import { loadDevicePreferences, saveDevicePreferences } from '../services/devicePreferences';
 import { toWireFormat } from '../utils/landmarkUtils';
 
 /**
- * The main screen: a 1:1 call with translation running in both directions.
+ * The meeting room.
  *
  * FOUR THINGS RUN AT ONCE HERE, AND THEY SHARE ONE CAMERA
  * -------------------------------------------------------
  *   1. MediaPipe reads the local video element for hand landmarks (local only)
  *   2. those landmarks stream to /ws/predict and come back as text
  *   3. the same MediaStream is published to the peer over WebRTC
- *   4. the Web Speech API captions the microphone for the other direction
+ *   4. the speech engine captions the microphone for the other direction
  *
  * getUserMedia is called exactly once and the resulting stream is shared.
- * Calling it twice would ask for the camera twice and, on some machines,
- * fail outright because the device is already open.
+ * Calling it twice would ask for the camera twice and, on some machines, fail
+ * outright because the device is already open.
+ *
+ * PRODUCING CAPTIONS IS SEPARATE FROM DISPLAYING THEM
+ * --------------------------------------------------
+ * Producing is automatic: an unmuted microphone produces speech captions, and
+ * sign recognition switched on with a live camera produces sign captions.
+ * Neither depends on any display setting, and neither depends on a panel
+ * component being mounted — which is why all of it lives in meeting-level hooks.
+ *
+ * The captions button controls DISPLAY only. Nobody's speech should go
+ * unrecognised because they chose not to look at captions themselves.
  */
 
 const SEND_INTERVAL_MS = 100; // 10 FPS to the inference socket
 
 // Violations before the host is prompted to remove the participant.
-// Configurable here rather than scattered through the UI.
 const MAX_VIOLATIONS = 3;
+
+// How long a caption keeps the blue ring on its author's tile.
+const ACTIVITY_HOLD_MS = 1500;
 
 export default function MeetingRoom() {
   const { code } = useParams();
   const [searchParams] = useSearchParams();
-  const captionSize = useCaptionSize();
+  const navigate = useNavigate();
+  const { user } = useAuth();
+  const toast = useToast();
+
   // ?debug=1 only. "I spoke and nothing happened" is not a reportable bug
   // without knowing which stage died.
   const debugEnabled = searchParams.get('debug') === '1';
   const lastSentRef2 = useRef('—');
   const lastReceivedRef = useRef('—');
-  const navigate = useNavigate();
-  const { user } = useAuth();
 
   const localVideoRef = useRef(null);
   const rafRef = useRef(null);
@@ -68,54 +84,89 @@ export default function MeetingRoom() {
   const [cameraError, setCameraError] = useState(null);
   const [landmarks, setLandmarks] = useState([]);
 
-  // Sign recognition is OPT-IN and OFF by default. It used to default to true
-  // for everyone, which is why the hearing participant's resting hands were
-  // being classified as signs ("M at 71%") while they were not signing at all.
-  const [signRecognitionOn, setSignRecognitionOn] = useState(false);
+  const { preferences, update: updatePreferences } = useMeetingPreferences(user?.id);
+
+  // Device ids come from session storage, written by the lobby.
+  //
+  // THIS USED TO READ QUERY PARAMETERS, AND THAT WAS THE BUG.
+  // Reported problem 6 was that the join URL carried a raw `deviceId`. The
+  // lobby was changed to write sessionStorage, but this page was still reading
+  // `searchParams.get('camera')` — which is now always null, so every meeting
+  // silently used the system default and the lobby's picker did nothing.
+  const initialDevices = useRef(loadDevicePreferences() ?? {}).current;
+  const [micId, setMicId] = useState(initialDevices.micId ?? '');
+  const [cameraId, setCameraId] = useState(initialDevices.cameraId ?? '');
+  const [speakerId, setSpeakerId] = useState(initialDevices.speakerId ?? '');
+
+  // Sign recognition is OPT-IN. It used to default to true for everyone, which
+  // is why a hearing participant's resting hands were classified as signs
+  // ("M at 71%") while they were not signing at all. The lobby's "I will be
+  // signing in this meeting" checkbox is what turns it on at join.
+  const [signRecognitionOn, setSignRecognitionOn] = useState(
+    Boolean(initialDevices.willSign),
+  );
   // Captions are DISPLAY only, and on by default for everyone.
   const [captionsVisible, setCaptionsVisible] = useState(true);
-  const [recognitionMode, setRecognitionMode] = useState('static');
-  const [micOn, setMicOn] = useState(true);
-  const [cameraOn, setCameraOn] = useState(true);
-  // en-IN by default: the demo is in India, and the Indian English
-  // acoustic model recognises local accents markedly better than en-US.
-  const [speechLanguage, setSpeechLanguage] = useState('en-IN');
-  // 'auto' prefers the browser engine, which streams interim text word by
-  // word. Whisper only emits when you pause, which reads as a dead feature if
-  // it is what you get by default in Chrome.
-  const [speechEngine, setSpeechEngine] = useState('auto');
-  const [transcriptCollapsed, setTranscriptCollapsed] = useState(false);
+  const [micOn, setMicOn] = useState(initialDevices.micOn !== false);
+  const [cameraOn, setCameraOn] = useState(initialDevices.cameraOn !== false);
+
+  const [openPanel, setOpenPanel] = useState(null); // null | details | people | transcript
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const [transcriptLines, setTranscriptLines] = useState([]);
+  const [transcriptLoading, setTranscriptLoading] = useState(false);
+  const [transcriptError, setTranscriptError] = useState(null);
+
+  const recognitionMode = preferences.recognitionMode;
+
+  const { cameras, microphones, speakers } = useMediaDevices({ enabled: true });
 
   // --- meeting record ------------------------------------------------------
+
+  const refreshTranscript = useCallback(
+    async (meetingId) => {
+      if (!meetingId) return;
+      setTranscriptLoading(true);
+      setTranscriptError(null);
+      try {
+        const rows = await transcriptsApi.list(meetingId);
+        setTranscriptLines(
+          rows.map((row) => ({
+            id: `db-${row.id}`,
+            speaker: row.user_name,
+            source: row.source,
+            text: row.content,
+            confidence: row.confidence,
+            timestamp: row.created_at,
+          })),
+        );
+      } catch (cause) {
+        setTranscriptError(cause?.message ?? 'Could not load the transcript');
+      } finally {
+        setTranscriptLoading(false);
+      }
+    },
+    [],
+  );
+
   useEffect(() => {
     let cancelled = false;
 
     async function joinMeeting() {
       try {
         const result = await meetingsApi.join(code);
-        if (!cancelled) setMeeting(result.meeting);
-
-        const existing = await transcriptsApi.list(result.meeting.id);
-        if (!cancelled) {
-          setTranscriptLines(
-            existing.map((row) => ({
-              id: `db-${row.id}`,
-              speaker: row.user_name,
-              source: row.source,
-              text: row.content,
-              confidence: row.confidence,
-              timestamp: row.created_at,
-            })),
-          );
-        }
-      } catch (error) {
+        if (cancelled) return;
+        setMeeting(result.meeting);
+        refreshTranscript(result.meeting.id);
+      } catch {
         // Already in the meeting, or it has ended — fall back to a read so the
-        // room still renders rather than dumping the user back to the dashboard.
+        // room still renders rather than dumping the user back to Home.
         try {
           const detail = await meetingsApi.get(code);
-          if (!cancelled) setMeeting(detail);
+          if (!cancelled) {
+            setMeeting(detail);
+            refreshTranscript(detail.id);
+          }
         } catch {
           if (!cancelled) navigate('/', { replace: true });
         }
@@ -126,55 +177,55 @@ export default function MeetingRoom() {
     return () => {
       cancelled = true;
     };
-  }, [code, navigate]);
+  }, [code, navigate, refreshTranscript]);
 
   // --- one camera, shared ---------------------------------------------------
+
   useEffect(() => {
     let stream = null;
     let cancelled = false;
 
     async function startMedia() {
       try {
-        // Devices chosen in the lobby arrive as query parameters, so a reload
-        // inside the meeting keeps them instead of silently reverting to the
-        // system default. `exact` is used deliberately: without it the browser
-        // treats the id as a preference and may hand back a different camera,
-        // which would make the lobby's selector a lie.
-        const chosenCamera = searchParams.get('camera');
-        const chosenMic = searchParams.get('mic');
-
+        // `exact` is deliberate: without it the browser treats the id as a
+        // preference and may hand back a different camera, which would make the
+        // lobby's selector a lie.
         stream = await navigator.mediaDevices.getUserMedia({
-          video: chosenCamera
-            ? { deviceId: { exact: chosenCamera }, width: { ideal: 640 }, height: { ideal: 480 } }
-            : { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' },
-          audio: chosenMic
+          video: initialDevices.cameraId
             ? {
-                deviceId: { exact: chosenMic },
+                deviceId: { exact: initialDevices.cameraId },
+                width: { ideal: 640 },
+                height: { ideal: 480 },
+              }
+            : { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' },
+          // Echo cancellation and noise suppression are not optional here.
+          // Speech recognition runs on this microphone, so the remote
+          // participant's voice coming back through the speakers would be
+          // transcribed as if this user had said it.
+          audio: initialDevices.micId
+            ? {
+                deviceId: { exact: initialDevices.micId },
                 echoCancellation: true,
                 noiseSuppression: true,
                 autoGainControl: true,
               }
             : { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
         });
+
         if (cancelled) {
           stream.getTracks().forEach((track) => track.stop());
           return;
         }
 
-        // The lobby may have been left with the camera or mic muted. Carry
-        // that through rather than surprising someone with a live camera they
-        // had deliberately switched off a moment earlier.
-        if (searchParams.get('cameraOff') === '1') {
-          stream.getVideoTracks().forEach((track) => {
-            track.enabled = false;
-          });
-          setCameraOn(false);
-        }
-        if (searchParams.get('micOff') === '1') {
+        // Carry the lobby's mute state through, rather than surprising someone
+        // with a live microphone they had deliberately switched off.
+        if (initialDevices.micOn === false) {
           stream.getAudioTracks().forEach((track) => {
             track.enabled = false;
           });
-          setMicOn(false);
+        }
+        if (initialDevices.cameraOn === false) {
+          stream.getVideoTracks().forEach((track) => track.stop());
         }
 
         setLocalStream(stream);
@@ -182,11 +233,10 @@ export default function MeetingRoom() {
         if (cancelled) return;
         if (error.name === 'NotAllowedError') {
           setCameraError(
-            'Camera and microphone permission denied. Allow access in your browser’s ' +
-              'address bar and reload.',
+            'Camera and microphone permission denied. Allow access from the icon in your browser address bar, then reload.',
           );
         } else if (error.name === 'NotReadableError') {
-          setCameraError('Camera is in use by another app. Close Zoom or Teams and reload.');
+          setCameraError('Your camera is in use by another app. Close it and reload.');
         } else {
           setCameraError(`Could not start camera or microphone: ${error.message}`);
         }
@@ -198,11 +248,12 @@ export default function MeetingRoom() {
       cancelled = true;
       stream?.getTracks().forEach((track) => track.stop());
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- acquire once, on mount
   }, []);
 
-  // Attach the stream to the local <video>, which MediaPipe then reads frames
-  // from. VideoTile handles this for tiles it owns; the local tile's element is
-  // shared with the detection loop, so it is wired here.
+  // Attach the stream to the local <video>, which MediaPipe reads frames from.
+  // The tile owns its own element for display; this hidden one is the detection
+  // source, so it is wired here and kept out of the layout.
   useEffect(() => {
     if (localVideoRef.current && localStream) {
       localVideoRef.current.srcObject = localStream;
@@ -211,18 +262,16 @@ export default function MeetingRoom() {
 
   // --- captions ------------------------------------------------------------
   // ONE store for both sources and both participants. Every caption — mine and
-  // theirs, sign and speech — arrives through the socket and is applied here
-  // by segment id. Previously each side rendered its own words from local state
-  // and the other person's from the socket, which is why the two screens
-  // disagreed about what had been said.
-  const { captions, applyCaption, clearCaptions } = useCaptionStore();
+  // theirs, sign and speech — arrives through the socket and is applied here by
+  // segment id. Each side used to render its own words from local state and the
+  // other person's from the socket, which is why the two screens disagreed
+  // about what had been said.
+  const { captions, applyCaption } = useCaptionStore();
 
-  // DECLARED BEFORE useSignSocket, deliberately.
-  //
-  // `const` bindings are hoisted but sit in the temporal dead zone until the
-  // line that initialises them runs. Passing this to the hook above its own
-  // declaration threw "Cannot access 'applyAndRecord' before initialization"
-  // and took the whole meeting screen down to the error boundary.
+  // DECLARED BEFORE useSignSocket, deliberately. `const` bindings sit in the
+  // temporal dead zone until their initialiser runs, so passing this to the
+  // hook above its own declaration threw "Cannot access 'applyAndRecord' before
+  // initialization" and took the whole screen to the error boundary.
   const applyAndRecord = useCallback(
     (event) => {
       lastReceivedRef.current = `${event.source}/${event.is_final ? 'final' : 'interim'}: ${(event.text ?? '').slice(0, 28)}`;
@@ -246,9 +295,9 @@ export default function MeetingRoom() {
     onCaption: applyAndRecord,
   });
 
-  // Producers hand captions to the socket. They never touch the store
-  // directly: the round trip through the server is what guarantees both
-  // participants see identical text, and it is also what persists it.
+  // Producers hand captions to the socket. They never touch the store directly:
+  // the round trip through the server is what guarantees both participants see
+  // identical text, and it is also what persists it.
   const emitCaption = useCallback(
     (caption) => {
       lastSentRef2.current = `${caption.source}/${caption.isFinal ? 'final' : 'interim'}: ${caption.text.slice(0, 28)}`;
@@ -257,21 +306,31 @@ export default function MeetingRoom() {
     [sendCaption],
   );
 
+  // A final caption means a new row exists server-side. Refresh the transcript
+  // then — and only then — so the panel matches the database without polling.
+  const lastFinalRef = useRef(0);
+  useEffect(() => {
+    const finals = captions.filter((caption) => caption.isFinal).length;
+    if (finals !== lastFinalRef.current) {
+      lastFinalRef.current = finals;
+      if (meeting?.id) refreshTranscript(meeting.id);
+    }
+  }, [captions, meeting?.id, refreshTranscript]);
+
+  // --- hand tracking -------------------------------------------------------
   // One hand for ASL fingerspelling, two for ISL fingerspelling and word signs.
   // Their features have a slot per hand, and tracking only one would leave half
-  // of every input zero. See RecognitionModeToggle for why these are separate
-  // modes rather than a language setting.
-  const { detect, status: landmarkerStatus, error: landmarkerError, isReady } =
-    useHandLandmarker({
-      numHands: recognitionMode === 'static' ? 1 : 2,
-      enabled: signRecognitionOn,
-    });
+  // of every input vector zero.
+  const { detect, error: landmarkerError, isReady } = useHandLandmarker({
+    numHands: recognitionMode === 'static' ? 1 : 2,
+    enabled: signRecognitionOn,
+  });
 
   useEffect(() => {
     // Gated on the camera as well as the sign toggle. Tracking a released
-    // camera is what left a frozen skeleton on screen.
+    // camera is what left a frozen skeleton drawn over a black tile.
     if (!localStream || !isReady || !signRecognitionOn || !cameraOn) {
-      // Clear any skeleton left from the last frame we did process, so the
+      // Clear any skeleton left from the last frame we processed, so the
       // overlay cannot outlive the video it was drawn from.
       setLandmarks([]);
       return undefined;
@@ -296,8 +355,8 @@ export default function MeetingRoom() {
         if (shouldSend) {
           lastSentRef.current = now;
           // Empty frames matter: they drive the neutral reset that closes a
-          // word when the signer lowers their hand, and in dynamic mode they
-          // are what marks the boundary between two signs.
+          // word when the signer lowers their hands, and in dynamic mode they
+          // mark the boundary between two signs.
           sendLandmarks([], recognitionMode);
         }
       }
@@ -311,13 +370,14 @@ export default function MeetingRoom() {
       cancelAnimationFrame(rafRef.current);
     };
   }, [localStream, isReady, signRecognitionOn, cameraOn, detect, sendLandmarks, recognitionMode]);
+
   // --- producing sign captions ---------------------------------------------
   // Segmentation lives in useSignCaptions, not in a server-side smoother and
   // not in this component. The old code committed a word every time a 2.5 s
-  // cooldown lapsed, which is why one held pose produced "warm warm warm" —
-  // a timer cannot tell "still signing this" from "signed it again". The hook
-  // watches hand MOTION instead, commits once per movement, and refuses to
-  // repeat a token until the hands have returned to rest.
+  // cooldown lapsed, which is why one held pose produced "warm warm warm" — a
+  // timer cannot tell "still signing this" from "signed it again". The hook
+  // watches hand MOTION, commits once per movement, and refuses to repeat a
+  // token until the hands have returned to rest.
   const signCaptions = useSignCaptions({
     enabled: Boolean(signRecognitionOn && cameraOn && meeting),
     mode: recognitionMode,
@@ -329,19 +389,15 @@ export default function MeetingRoom() {
   // --- producing speech captions -------------------------------------------
   // Keyed to ONE thing: is my microphone unmuted. Not to a panel toggle.
   //
-  // Recognition used to be gated on a `speechOn` flag that defaulted to OFF,
-  // so a participant who never found that toggle produced no captions at all —
+  // Recognition used to be gated on a `speechOn` flag that defaulted to off, so
+  // a participant who never found that toggle produced no captions at all —
   // while the panel still said "listening", because that reported the
-  // recogniser object's state rather than whether any audio reached it. That
-  // is the reported "spoke and nothing happened".
-  //
-  // Producing is now automatic; the captions button only controls DISPLAY.
-  // Nobody's speech should go unrecognised because they chose not to look at
-  // captions themselves.
+  // recogniser object's state rather than whether any audio reached it. That is
+  // the reported "spoke and nothing happened".
   const speech = useSpeechCaptions({
     enabled: Boolean(micOn && meeting),
-    engine: speechEngine,
-    language: speechLanguage,
+    engine: preferences.speechEngine,
+    language: preferences.speechLanguage,
     meetingCode: code,
     onCaption: emitCaption,
   });
@@ -354,6 +410,7 @@ export default function MeetingRoom() {
     error: rtcError,
     hangUp,
     replaceVideoTrack,
+    replaceAudioTrack,
     addScreenTrack,
     removeScreenSender,
     remoteScreenStream,
@@ -366,16 +423,19 @@ export default function MeetingRoom() {
   });
 
   // --- controls ------------------------------------------------------------
-  function toggleMic() {
-    const next = !micOn;
-    // Disabling the track is the right move rather than removing it: the peer
-    // connection stays negotiated, so unmuting is instant instead of
-    // triggering a fresh offer/answer round trip.
-    localStream?.getAudioTracks().forEach((track) => {
-      track.enabled = next;
+
+  const toggleMic = useCallback(() => {
+    setMicOn((current) => {
+      const next = !current;
+      // Disabling the track rather than removing it: the peer connection stays
+      // negotiated, so unmuting is instant instead of triggering a fresh
+      // offer/answer round trip.
+      localStream?.getAudioTracks().forEach((track) => {
+        track.enabled = next;
+      });
+      return next;
     });
-    setMicOn(next);
-  }
+  }, [localStream]);
 
   /**
    * Turn the camera genuinely on or off.
@@ -383,24 +443,24 @@ export default function MeetingRoom() {
    * THE BUG THIS FIXES
    * ------------------
    * This used to set `track.enabled = false`, which keeps the hardware open,
-   * keeps the indicator light on, and merely transmits black frames. Two
-   * things went wrong as a result:
+   * keeps the indicator light on, and merely transmits black frames. Two things
+   * went wrong as a result:
    *
-   *   * the tile went black while the camera was still demonstrably running,
-   *     so the button said "Turn camera on" about a camera that was on;
+   *   * the tile went black while the camera was demonstrably still running, so
+   *     the button said "Turn camera on" about a camera that was on;
    *   * the detection loop early-returned on !cameraOn WITHOUT clearing
    *     `landmarks`, so the last hand skeleton stayed in React state and kept
    *     drawing over the black tile forever. That is exactly the reported
    *     "both tiles black, yet the skeleton is drawn".
    *
-   * Off now STOPS the track and releases the device. On re-acquires it and
-   * swaps it into the existing peer connection with replaceTrack, so the
-   * remote side sees the stream resume without a renegotiation.
+   * Off now STOPS the track and releases the device. On re-acquires it and swaps
+   * it into the existing peer connection with replaceTrack, so the remote side
+   * sees the stream resume without a renegotiation.
    */
   const toggleCamera = useCallback(async () => {
     if (cameraOn) {
-      // Clear the overlay FIRST. Otherwise a stale skeleton is visible for the
-      // frame or two before React re-renders without it.
+      // Clear the overlay FIRST, or a stale skeleton is visible for the frame
+      // or two before React re-renders without it.
       setLandmarks([]);
 
       localStream?.getVideoTracks().forEach((track) => {
@@ -413,10 +473,9 @@ export default function MeetingRoom() {
     }
 
     try {
-      const preferences = loadDevicePreferences();
       const fresh = await navigator.mediaDevices.getUserMedia({
-        video: preferences?.cameraId
-          ? { deviceId: { exact: preferences.cameraId }, width: { ideal: 640 }, height: { ideal: 480 } }
+        video: cameraId
+          ? { deviceId: { exact: cameraId }, width: { ideal: 640 }, height: { ideal: 480 } }
           : { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' },
         audio: false,
       });
@@ -426,11 +485,6 @@ export default function MeetingRoom() {
 
       localStream?.addTrack(track);
       await replaceVideoTrack(track);
-
-      if (localVideoRef.current && localStream) {
-        localVideoRef.current.srcObject = localStream;
-        await localVideoRef.current.play().catch(() => {});
-      }
       setCameraOn(true);
     } catch (cause) {
       setCameraError(
@@ -439,28 +493,106 @@ export default function MeetingRoom() {
           : `Could not restart the camera: ${cause?.message ?? cause}`,
       );
     }
-  }, [cameraOn, localStream, replaceVideoTrack]);
+  }, [cameraOn, cameraId, localStream, replaceVideoTrack]);
 
-  async function leaveMeeting() {
-    hangUp();
-    try {
-      await meetingsApi.leave(code);
-    } catch {
-      // Leaving is best-effort; the user is going regardless.
-    }
-    navigate('/', { replace: true });
-  }
+  /**
+   * Swap one device mid-call.
+   *
+   * The new track has to go three places, and missing any one of them is a
+   * distinct bug: into the local MediaStream (so MediaPipe and the speech
+   * engine read it), into the peer sender (so the other person gets it), and
+   * into session storage (so a reload keeps it).
+   */
+  const changeDevice = useCallback(
+    async (kind, deviceId) => {
+      if (kind === 'speaker') {
+        setSpeakerId(deviceId);
+        saveDevicePreferences({ micId, cameraId, speakerId: deviceId, willSign: signRecognitionOn });
+        return;
+      }
 
-  // --- Interview Mode ------------------------------------------------------
+      const isAudio = kind === 'mic';
+      if (isAudio) setMicId(deviceId);
+      else setCameraId(deviceId);
+      saveDevicePreferences({
+        micId: isAudio ? deviceId : micId,
+        cameraId: isAudio ? cameraId : deviceId,
+        speakerId,
+        willSign: signRecognitionOn,
+      });
+
+      if (!localStream) return;
+      // The camera being off is not a reason to open it: the user changed which
+      // camera they will use, not whether it is on.
+      if (!isAudio && !cameraOn) return;
+
+      try {
+        const fresh = await navigator.mediaDevices.getUserMedia(
+          isAudio
+            ? {
+                audio: {
+                  deviceId: { exact: deviceId },
+                  echoCancellation: true,
+                  noiseSuppression: true,
+                  autoGainControl: true,
+                },
+              }
+            : {
+                video: {
+                  deviceId: { exact: deviceId },
+                  width: { ideal: 640 },
+                  height: { ideal: 480 },
+                },
+              },
+        );
+
+        const [track] = isAudio ? fresh.getAudioTracks() : fresh.getVideoTracks();
+        if (!track) return;
+
+        const old = isAudio ? localStream.getAudioTracks() : localStream.getVideoTracks();
+        old.forEach((existing) => {
+          existing.stop();
+          localStream.removeTrack(existing);
+        });
+
+        track.enabled = isAudio ? micOn : true;
+        localStream.addTrack(track);
+
+        if (isAudio) await replaceAudioTrack(track);
+        else await replaceVideoTrack(track);
+      } catch (cause) {
+        setCameraError(
+          `Could not switch ${isAudio ? 'microphone' : 'camera'}: ${cause?.message ?? cause}`,
+        );
+      }
+    },
+    [
+      micId, cameraId, speakerId, signRecognitionOn, localStream, cameraOn, micOn,
+      replaceAudioTrack, replaceVideoTrack,
+    ],
+  );
+
+  const leaveMeeting = useCallback(
+    async ({ endForEveryone = false } = {}) => {
+      hangUp();
+      try {
+        if (endForEveryone) await meetingsApi.end(code);
+        else await meetingsApi.leave(code);
+      } catch {
+        // Leaving is best-effort; the user is going regardless.
+      }
+      navigate(`/ended/${code}`, { replace: true, state: { endedByHost: endForEveryone } });
+    },
+    [code, hangUp, navigate],
+  );
+
+  // --- interview mode ------------------------------------------------------
   // The mode lives on the MEETING RECORD, not in local state, so a participant
   // who reloads or reconnects arrives already subject to it. Reloading must not
   // be a way out.
   const isHost = Boolean(meeting?.host?.id && user?.id && meeting.host.id === user.id);
   const interviewOn = Boolean(meeting?.is_interview_mode);
 
-  // Each focus change is posted to the backend so the record survives a page
-  // reload — a tab switch the participant then refreshes away should still be
-  // in the host's log.
   const handleViolation = useCallback(
     ({ type, durationMs }) => {
       if (!interviewOn) return;
@@ -478,47 +610,22 @@ export default function MeetingRoom() {
     maxViolations: MAX_VIOLATIONS,
   });
 
-  // The host's live view of who has left and how often.
-  const [violationLog, setViolationLog] = useState([]);
-
-  const refreshViolations = useCallback(() => {
-    if (!isHost || !interviewOn) return;
-    meetingsApi
-      .focusEvents(code)
-      .then((summary) => setViolationLog(summary.by_participant ?? []))
-      .catch(() => {
-        /* the host's panel is informational; a failure must not break the call */
-      });
-  }, [code, interviewOn, isHost]);
-
-  // Polled rather than pushed. The violation feed is a host-only side panel,
-  // and adding a third message type to the inference socket to carry it would
-  // couple attention logging to sign recognition — a failure in one would then
-  // take down the other. Five seconds is well inside human reaction time for
-  // something the host acts on by talking to the candidate.
-  useEffect(() => {
-    if (!isHost || !interviewOn) return undefined;
-    refreshViolations();
-    const timer = setInterval(refreshViolations, 5000);
-    return () => clearInterval(timer);
-  }, [isHost, interviewOn, refreshViolations]);
-
   const toggleInterviewMode = useCallback(async () => {
     if (!isHost) return;
     try {
       const updated = await meetingsApi.setInterviewMode(code, !interviewOn);
       setMeeting(updated);
+      toast.show(
+        updated.is_interview_mode ? 'Interview mode is on' : 'Interview mode is off',
+        { icon: 'policy' },
+      );
     } catch (cause) {
-      setCameraError(cause.message ?? 'Could not change interview mode');
+      toast.show(cause?.message ?? 'Could not change interview mode', { icon: 'error' });
     }
-  }, [code, interviewOn, isHost]);
+  }, [code, interviewOn, isHost, toast]);
 
   // --- screen sharing ------------------------------------------------------
-  const screenShare = useScreenShare({
-    addScreenTrack,
-    removeScreenSender,
-    sendSignal,
-  });
+  const screenShare = useScreenShare({ addScreenTrack, removeScreenSender, sendSignal });
 
   const handlePresent = useCallback(async () => {
     if (screenShare.isPresenting) {
@@ -535,13 +642,68 @@ export default function MeetingRoom() {
     }
 
     // Opening the screen picker takes focus away from the page, which the
-    // interview-mode detector would otherwise record as a violation. The
-    // picker is the app's own dialog, so it is suppressed for its duration.
+    // interview-mode detector would otherwise record as a violation. The picker
+    // is the app's own dialog, so it is suppressed for its duration.
     interview.suppressBriefly?.(4000);
     await screenShare.startPresenting();
   }, [screenShare, remotePresenter, interview]);
 
-  const someoneIsPresenting = screenShare.isPresenting || Boolean(remoteScreenStream);
+  const screenStream = screenShare.isPresenting
+    ? screenShare.localScreenStream
+    : remoteScreenStream;
+
+  // --- fullscreen ----------------------------------------------------------
+  const toggleFullscreen = useCallback(() => {
+    const element = document.documentElement;
+    if (document.fullscreenElement) {
+      document.exitFullscreen?.().catch(() => {});
+    } else {
+      element.requestFullscreen?.().catch(() => {
+        toast.show('Your browser would not allow full screen', { icon: 'error' });
+      });
+    }
+  }, [toast]);
+
+  // --- who is active -------------------------------------------------------
+  /**
+   * Whose tile gets the blue ring, and who shows the signing hand.
+   *
+   * Derived from recent CAPTIONS rather than from an audio level meter. A level
+   * meter on the remote stream would show the ring for any noise — a door, a
+   * cough — whereas a caption means the system actually recognised something
+   * from that person. For a captioning product, "produced a caption recently" is
+   * the honest definition of active.
+   *
+   * It also gives sign activity for free, which no audio meter could.
+   */
+  const [activity, setActivity] = useState({});
+  useEffect(() => {
+    const newest = captions[captions.length - 1];
+    if (!newest?.speakerName) return undefined;
+
+    setActivity((current) => ({
+      ...current,
+      [newest.speakerName]: { source: newest.source, at: Date.now() },
+    }));
+
+    const timer = setTimeout(() => {
+      setActivity((current) => {
+        const entry = current[newest.speakerName];
+        if (!entry || Date.now() - entry.at < ACTIVITY_HOLD_MS) return current;
+        const next = { ...current };
+        delete next[newest.speakerName];
+        return next;
+      });
+    }, ACTIVITY_HOLD_MS + 50);
+
+    return () => clearTimeout(timer);
+  }, [captions]);
+
+  const localName = user?.name ?? 'You';
+  const remoteName = peer?.name ?? null;
+
+  const localActivity = activity[localName];
+  const remoteActivity = remoteName ? activity[remoteName] : null;
 
   // --- keyboard shortcuts --------------------------------------------------
   // Ctrl/Cmd+D microphone, Ctrl/Cmd+E camera, C captions. Skipped while focus
@@ -565,41 +727,98 @@ export default function MeetingRoom() {
 
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [toggleCamera]);
+  }, [toggleCamera, toggleMic]);
 
-  // Start on a mode the server can actually serve. Defaulting to ASL when only
-  // the ISL word model is trained would show an empty panel and look broken,
-  // so the first usable mode is selected once the server reports what it has.
-  // Word signs are preferred: that is the model a fluent signer will use.
+  // --- toasts --------------------------------------------------------------
+  // Keyed on the peer's NAME, not the peer object: useWebRTC produces a new
+  // object on reconnect, which would announce the same person joining twice.
+  const lastPeerNameRef = useRef(null);
+  useEffect(() => {
+    const name = peer?.name ?? null;
+    if (name === lastPeerNameRef.current) return;
+
+    if (name) toast.show(`${name} joined the meeting`, { icon: 'person_add' });
+    else if (lastPeerNameRef.current) {
+      toast.show(`${lastPeerNameRef.current} left the meeting`, { icon: 'person_remove' });
+    }
+    lastPeerNameRef.current = name;
+  }, [peer?.name, toast]);
+
+  const lastPresenterRef = useRef(null);
+  useEffect(() => {
+    const name = remotePresenter?.name ?? null;
+    if (name === lastPresenterRef.current) return;
+    if (name) toast.show(`${name} started presenting`, { icon: 'present_to_all' });
+    lastPresenterRef.current = name;
+  }, [remotePresenter?.name, toast]);
+
+  // --- start on a mode the server can actually serve ------------------------
+  // Defaulting to ASL when only the ISL word model is trained would show an
+  // empty panel and look broken, so the first usable mode is selected once the
+  // server reports what it has. Word signs are preferred: that is the model a
+  // fluent signer will use.
   useEffect(() => {
     const available = {
       dynamic: dynamicModelInfo?.loaded,
       isl: islModelInfo?.loaded,
       static: modelInfo?.loaded,
     };
-    if (available[recognitionMode] || Object.values(available).every((v) => v === undefined)) return;
+    if (available[recognitionMode] || Object.values(available).every((v) => v === undefined)) {
+      return;
+    }
     const usable = ['dynamic', 'isl', 'static'].find((name) => available[name]);
-    if (usable) setRecognitionMode(usable);
-  }, [modelInfo, islModelInfo, dynamicModelInfo]);
+    if (usable) updatePreferences({ recognitionMode: usable });
+  }, [modelInfo, islModelInfo, dynamicModelInfo, recognitionMode, updatePreferences]);
 
-  const handDetected = landmarks.length > 0;
+  // Has the server told us about its models yet? The socket reports all three
+  // in its `connected` message, so until then every one of them is null — which
+  // is NOT the same as "none is loaded", and must not be rendered as if it were.
+  const signModelsKnown =
+    modelInfo != null || islModelInfo != null || dynamicModelInfo != null;
+  const signAvailable = Boolean(
+    modelInfo?.loaded || islModelInfo?.loaded || dynamicModelInfo?.loaded,
+  );
+
+  const errorBanner = cameraError || rtcError || landmarkerError || screenShare.error
+    || signError?.message;
+
+  const panelTitle = useMemo(
+    () => ({ details: 'Meeting details', people: 'People', transcript: 'Transcript' })[openPanel],
+    [openPanel],
+  );
+
+  // ---------------------------------------------------------------- render --
 
   return (
-    <main className="mx-auto flex min-h-screen max-w-7xl flex-col gap-4 p-4">
-      {/* The dialog blocks the meeting until acknowledged. Its button is also
-          the user gesture the browser requires before fullscreen is allowed —
-          which is why enforcement starts on the click, not on mount. */}
-      {interviewOn && !isHost && !interview.acknowledged && (
+    <div className="on-dark flex h-screen flex-col overflow-hidden bg-dark-bg">
+      {/* The hidden detection source. MediaPipe needs a <video> it can read
+          frames from; the visible tile has its own element, and sharing one
+          between the two would couple the detection loop to the tile's layout. */}
+      <video ref={localVideoRef} autoPlay playsInline muted className="hidden" />
+
+      {/* Blocks the meeting until acknowledged. Its button is also the user
+          gesture the browser requires before fullscreen is allowed, which is
+          why enforcement starts on the click rather than on mount. */}
+      {interviewOn && !isHost && !interview.acknowledged ? (
         <InterviewModeDialog
           hostName={meeting?.host?.name}
           capabilities={interview.capabilities}
           onAcknowledge={interview.acknowledge}
         />
-      )}
+      ) : null}
 
       {/* Covers the meeting while they are away or out of fullscreen, so
           leaving costs them the view rather than being free. */}
-      {debugEnabled && (
+      {interview.mustBlock ? (
+        <InterviewModeOverlay
+          awayCount={interview.awayCount}
+          maxViolations={MAX_VIOLATIONS}
+          isFullscreen={interview.isFullscreen}
+          onReturn={interview.reEnterFullscreen}
+        />
+      ) : null}
+
+      {debugEnabled ? (
         <DebugOverlay
           micTrack={localStream?.getAudioTracks()[0]?.readyState ?? 'none'}
           cameraTrack={localStream?.getVideoTracks()[0]?.readyState ?? 'none'}
@@ -614,274 +833,213 @@ export default function MeetingRoom() {
           lastSent={lastSentRef2.current}
           lastReceived={lastReceivedRef.current}
         />
-      )}
+      ) : null}
 
-      {interview.mustBlock && (
-        <InterviewModeOverlay
-          awayCount={interview.awayCount}
-          maxViolations={MAX_VIOLATIONS}
-          isFullscreen={interview.isFullscreen}
-          onReturn={interview.reEnterFullscreen}
-        />
-      )}
-
-      <header className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">
-            {meeting?.title ?? 'Meeting'}
-          </h1>
-          <p className="text-sm text-slate-400">
-            Code <span className="font-mono font-semibold text-slate-200">{code}</span>
-            {' · '}
-            {peer ? `with ${peer.name}` : 'waiting for the other participant'}
-            {' · '}
-            call {connectionState}
-            {meeting?.started_at && (
-              <>
-                {' · '}
-                <MeetingTimer startedAt={meeting.started_at} />
-              </>
-            )}
-          </p>
-
-          <div className="mt-2 flex flex-wrap items-center gap-2">
-            <CopyLinkButton code={code} />
-            <CaptionSizeControl size={captionSize.size} onChoose={captionSize.choose} />
-            {interviewOn && (
-              <span
-                className="rounded bg-signal-warn/20 px-2 py-1 text-xs font-semibold uppercase text-signal-warn"
-                role="status"
-              >
-                Interview mode
-              </span>
-            )}
-          </div>
-        </div>
-        <button type="button" onClick={leaveMeeting}
-                className="rounded-lg bg-signal-bad px-4 py-2 font-semibold text-ink-900 hover:opacity-90">
-          Leave meeting
-        </button>
-      </header>
-
-      {(cameraError || rtcError || landmarkerError) && (
-        <p className="rounded-lg border border-signal-bad/40 bg-signal-bad/10 p-3 text-sm text-signal-bad"
-           role="alert">
-          {cameraError || rtcError || landmarkerError}
+      {errorBanner ? (
+        <p
+          role="alert"
+          className="flex shrink-0 items-center gap-2 bg-dark-danger/15 px-4 py-2 text-sm text-dark-danger"
+        >
+          <Icon name="error" size={18} />
+          <span className="min-w-0">{errorBanner}</span>
         </p>
-      )}
+      ) : null}
 
-      <div className="grid flex-1 gap-4 lg:grid-cols-[minmax(0,1fr)_22rem]">
-        <div className="flex flex-col gap-4">
-          {/* --- presenter bar ------------------------------------------ */}
-          {screenShare.isPresenting && (
-            <div
-              className="flex items-center justify-between gap-3 rounded-xl border border-bridge-500/50 bg-bridge-500/15 px-4 py-2"
-              role="status"
-            >
-              <span className="text-sm font-medium text-bridge-400">
-                You are presenting to everyone
-              </span>
-              <button
-                type="button"
-                onClick={screenShare.stopPresenting}
-                className="rounded-full border border-signal-bad px-3 py-1 text-sm text-signal-bad hover:bg-signal-bad/10"
-              >
-                Stop presenting
-              </button>
-            </div>
-          )}
-
-          {screenShare.error && (
-            <p className="rounded-lg border border-signal-bad/40 bg-signal-bad/10 p-2 text-xs text-signal-bad" role="alert">
-              {screenShare.error}
-            </p>
-          )}
-
-          {/* --- the shared screen, when there is one --------------------- */}
-          {/* object-contain, never object-cover: cropping a shared screen
-              cuts off exactly the content someone is pointing at. */}
-          {someoneIsPresenting && (
-            <div className="relative flex-1 overflow-hidden rounded-xl border border-ink-700 bg-black">
-              <video
-                autoPlay
-                playsInline
-                muted
-                className="h-full w-full object-contain"
-                ref={(element) => {
-                  if (!element) return;
-                  const stream = screenShare.isPresenting
-                    ? screenShare.localScreenStream
-                    : remoteScreenStream;
-                  if (stream && element.srcObject !== stream) {
-                    element.srcObject = stream;
-                    element.play().catch(() => {});
-                  }
-                }}
-              />
-              <p className="absolute bottom-2 left-3 rounded bg-black/70 px-2 py-0.5 text-sm text-slate-100">
-                {screenShare.isPresenting
-                  ? 'Your screen'
-                  : `${remotePresenter?.name ?? 'Participant'}'s screen`}
-              </p>
-            </div>
-          )}
-
-          {/* Camera tiles: side by side normally, a narrow strip while
-              someone is presenting so the signer stays visible. */}
-          <div
-            className={
-              someoneIsPresenting
-                ? 'grid shrink-0 grid-cols-2 gap-3 lg:max-w-xs'
-                : 'grid gap-4 sm:grid-cols-2'
-            }
+      {/* Presenter bar. Only the presenter sees it; everyone else sees the
+          shared screen itself, which needs no announcement. */}
+      {screenShare.isPresenting ? (
+        <div
+          role="status"
+          className="flex shrink-0 items-center justify-between gap-3 bg-dark-accent/15 px-4 py-2"
+        >
+          <span className="text-sm font-medium text-dark-accent">
+            You are presenting to everyone
+          </span>
+          <button
+            type="button"
+            onClick={screenShare.stopPresenting}
+            className="rounded-full border border-dark-danger px-3 py-1 text-sm text-dark-danger
+                       transition-colors hover:bg-dark-danger/10"
           >
-            <VideoTile
-              videoRef={localVideoRef}
-              stream={localStream}
-              label={`${user?.name ?? 'You'} (you)`}
-              muted
-              mirrored
-              placeholder={cameraError ?? 'Starting camera…'}
-            >
-              {signRecognitionOn && (
-                <HandOverlayCanvas
-                  landmarks={landmarks}
-                  mirrored
-                  stable={prediction?.stable ?? false}
-                />
-              )}
-            </VideoTile>
+            Stop presenting
+          </button>
+        </div>
+      ) : null}
 
-            <VideoTile
-              stream={remoteStream}
-              label={peer?.name ?? 'Waiting for participant'}
-              placeholder="Share the meeting code so someone can join."
-            />
-          </div>
-
-          <CaptionArea
-            captions={captions}
-            size={captionSize.size}
-            visible={captionsVisible}
+      {/* stage + panel, side by side so the stage genuinely shrinks */}
+      <div className="relative flex min-h-0 flex-1">
+        <div className="flex min-w-0 flex-1 flex-col">
+          <Stage
+            localStream={localStream}
+            localName={localName}
+            localMuted={!micOn}
+            localCameraOff={!cameraOn}
+            localSpeaking={localActivity?.source === 'speech'}
+            localSigning={localActivity?.source === 'sign'}
+            remoteStream={remoteStream}
+            remoteName={remoteName}
+            remoteMuted={false}
+            remoteCameraOff={false}
+            remoteSpeaking={remoteActivity?.source === 'speech'}
+            remoteSigning={remoteActivity?.source === 'sign'}
+            screenStream={screenStream}
+            presenterName={remotePresenter?.name}
+            isPresentingLocally={screenShare.isPresenting}
+            interviewOn={interviewOn}
+            localOverlay={
+              signRecognitionOn && cameraOn ? (
+                <>
+                  {preferences.showHandOverlay ? (
+                    <HandOverlayCanvas landmarks={landmarks} mirrored />
+                  ) : null}
+                  <SignPill
+                    pending={signCaptions.pending}
+                    prediction={prediction}
+                    onUndo={signCaptions.undoLast}
+                    onClear={signCaptions.clearCurrent}
+                  />
+                </>
+              ) : null
+            }
           />
 
-          {/* --- control bar ------------------------------------------- */}
-          {/* Producing captions is automatic and keyed to the microphone and
-              camera. These buttons control the DEVICES and the DISPLAY, never
-              whether recognition runs — that separation is the whole point of
-              Part A1. */}
-          <div className="flex flex-wrap items-center gap-2 rounded-xl border border-ink-700 bg-ink-800 p-3">
-            <button
-              type="button"
-              onClick={toggleMic}
-              aria-pressed={micOn}
-              title="Microphone (Ctrl+D). Speech captions follow this."
-              className={`rounded-full border px-4 py-2 text-sm ${
-                micOn ? 'border-ink-700 hover:bg-ink-700' : 'border-signal-bad bg-signal-bad/20 text-signal-bad'
-              }`}
-            >
-              {micOn ? 'Mute' : 'Unmute'}
-            </button>
-
-            <button
-              type="button"
-              onClick={toggleCamera}
-              aria-pressed={cameraOn}
-              title="Camera (Ctrl+E)"
-              className={`rounded-full border px-4 py-2 text-sm ${
-                cameraOn ? 'border-ink-700 hover:bg-ink-700' : 'border-signal-bad bg-signal-bad/20 text-signal-bad'
-              }`}
-            >
-              {cameraOn ? 'Camera off' : 'Camera on'}
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setCaptionsVisible((value) => !value)}
-              aria-pressed={captionsVisible}
-              title="Show or hide captions (C). Does not affect what others receive."
-              className={`rounded-full border px-4 py-2 text-sm ${
-                captionsVisible
-                  ? 'border-bridge-500 bg-bridge-500/20 text-bridge-400'
-                  : 'border-ink-700 hover:bg-ink-700'
-              }`}
-            >
-              CC
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setSignRecognitionOn((value) => !value)}
-              aria-pressed={signRecognitionOn}
-              disabled={!cameraOn}
-              title={cameraOn ? 'Sign recognition' : 'Turn on your camera to sign'}
-              className={`rounded-full border px-4 py-2 text-sm disabled:opacity-40 ${
-                signRecognitionOn
-                  ? 'border-bridge-500 bg-bridge-500/20 text-bridge-400'
-                  : 'border-ink-700 hover:bg-ink-700'
-              }`}
-            >
-              🤟 Sign
-            </button>
-
-            <button
-              type="button"
-              onClick={handlePresent}
-              aria-pressed={screenShare.isPresenting}
-              title={
-                screenShare.isPresenting
-                  ? 'Stop presenting'
-                  : remotePresenter
-                    ? `${remotePresenter.name} is presenting — take over?`
-                    : 'Present your screen'
-              }
-              className={`rounded-full border px-4 py-2 text-sm ${
-                screenShare.isPresenting
-                  ? 'border-bridge-500 bg-bridge-500/20 text-bridge-400'
-                  : 'border-ink-700 hover:bg-ink-700'
-              }`}
-            >
-              {screenShare.isPresenting ? 'Stop presenting' : 'Present'}
-            </button>
-
-            {isHost && (
-              <button
-                type="button"
-                onClick={toggleInterviewMode}
-                aria-pressed={interviewOn}
-                className={`rounded-full border px-4 py-2 text-sm ${
-                  interviewOn
-                    ? 'border-signal-warn bg-signal-warn/20 text-signal-warn'
-                    : 'border-ink-700 hover:bg-ink-700'
-                }`}
-              >
-                Interview mode
-              </button>
-            )}
-
-            <span className="ml-auto text-xs text-slate-400">
-              {speech.engineActive
-                ? `speech: ${speech.engineActive} · ${speech.state}`
-                : 'speech: unavailable in this browser'}
-            </span>
-
-            {speech.error && (
-              <span className="text-xs text-signal-bad" role="alert">
-                {speech.error}
-              </span>
-            )}
-            {speech.notice && (
-              <span className="text-xs text-signal-warn">{speech.notice}</span>
-            )}
-          </div>
+          <CaptionRail
+            captions={captions}
+            size={preferences.captionSize}
+            visible={captionsVisible}
+          />
         </div>
+
+        <SidePanel
+          open={openPanel !== null}
+          title={panelTitle ?? ''}
+          onClose={() => setOpenPanel(null)}
+        >
+          {openPanel === 'details' ? <DetailsPanel meeting={meeting} code={code} /> : null}
+          {openPanel === 'people' ? (
+            <PeoplePanel
+              localName={localName}
+              localMuted={!micOn}
+              localCameraOff={!cameraOn}
+              localSigning={signRecognitionOn}
+              remoteName={remoteName}
+              remoteStream={remoteStream}
+              remoteSigning={remoteActivity?.source === 'sign'}
+              connectionState={connectionState}
+            />
+          ) : null}
+          {openPanel === 'transcript' ? (
+            <LiveTranscriptPanel
+              lines={transcriptLines}
+              loading={transcriptLoading}
+              error={transcriptError}
+              onRefresh={() => refreshTranscript(meeting?.id)}
+              onDownload={async (format) => {
+                try {
+                  const filename = await transcriptsApi.download(meeting.id, format);
+                  toast.show(`Saved ${filename}`, { icon: 'download_done' });
+                } catch (cause) {
+                  toast.show(cause?.message ?? 'Could not download', { icon: 'error' });
+                }
+              }}
+            />
+          ) : null}
+        </SidePanel>
       </div>
 
-      {landmarkerStatus === 'loading' && (
-        <p className="text-sm text-slate-400" role="status">
-          Loading hand-tracking model…
-        </p>
-      )}
-    </main>
+      <ControlBar
+        micOn={micOn}
+        cameraOn={cameraOn}
+        captionsOn={captionsVisible}
+        signOn={signRecognitionOn}
+        signAvailable={signAvailable}
+        signModelsKnown={signModelsKnown}
+        isPresenting={screenShare.isPresenting}
+        someoneElseIsPresenting={Boolean(remotePresenter)}
+        openPanel={openPanel}
+        isHost={isHost}
+        interviewOn={interviewOn}
+        meetingCode={code}
+        onToggleMic={toggleMic}
+        onToggleCamera={toggleCamera}
+        onToggleCaptions={() => setCaptionsVisible((value) => !value)}
+        onToggleSign={() => setSignRecognitionOn((value) => !value)}
+        onPresent={handlePresent}
+        onOpenPanel={(panel) => setOpenPanel((current) => (current === panel ? null : panel))}
+        onOpenSettings={() => setSettingsOpen(true)}
+        onToggleFullscreen={toggleFullscreen}
+        onToggleInterviewMode={toggleInterviewMode}
+        onLeave={() => leaveMeeting()}
+        onEndForEveryone={() => leaveMeeting({ endForEveryone: true })}
+      />
+
+      <SettingsDialog
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        preferences={preferences}
+        onChange={updatePreferences}
+        microphones={microphones}
+        speakers={speakers}
+        cameras={cameras}
+        micId={micId}
+        speakerId={speakerId}
+        cameraId={cameraId}
+        onMicChange={(value) => changeDevice('mic', value)}
+        onSpeakerChange={(value) => changeDevice('speaker', value)}
+        onCameraChange={(value) => changeDevice('camera', value)}
+        modelInfo={modelInfo}
+        islModelInfo={islModelInfo}
+        dynamicModelInfo={dynamicModelInfo}
+        speechState={speech.state}
+        speechEngineActive={speech.engineActive}
+      />
+    </div>
+  );
+}
+
+/**
+ * What is being detected right now, on your own tile, with undo and clear.
+ *
+ * Only you see this. It exists so a signer can correct their own caption BEFORE
+ * it is finalised and sent — the alternative is noticing a wrong word after it
+ * has already appeared on the other person's screen and been written to the
+ * transcript, where nothing in the interface can take it back.
+ */
+function SignPill({ pending, prediction, onUndo, onClear }) {
+  const label = pending || prediction?.label || null;
+  if (!label) return null;
+
+  const confidence = prediction?.confidence;
+
+  return (
+    <div className="absolute left-2 top-2 z-10 flex max-w-[85%] items-center gap-1 rounded-full
+                    bg-black/65 py-1 pl-3 pr-1 backdrop-blur">
+      <span className="min-w-0 truncate text-xs font-medium text-dark-text">
+        {label}
+        {confidence != null ? (
+          <span className="ml-1 text-dark-muted">{Math.round(confidence * 100)}%</span>
+        ) : null}
+      </span>
+      <button
+        type="button"
+        onClick={onUndo}
+        aria-label="Undo the last recognised word"
+        title="Undo last"
+        className="grid h-6 w-6 shrink-0 place-items-center rounded-full text-dark-muted
+                   transition-colors hover:bg-white/15 hover:text-dark-text"
+      >
+        <Icon name="undo" size={14} />
+      </button>
+      <button
+        type="button"
+        onClick={onClear}
+        aria-label="Clear what has been recognised so far"
+        title="Clear"
+        className="grid h-6 w-6 shrink-0 place-items-center rounded-full text-dark-muted
+                   transition-colors hover:bg-white/15 hover:text-dark-text"
+      >
+        <Icon name="backspace" size={14} />
+      </button>
+    </div>
   );
 }

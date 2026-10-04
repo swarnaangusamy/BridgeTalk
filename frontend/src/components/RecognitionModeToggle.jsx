@@ -66,7 +66,7 @@ export default function RecognitionModeToggle({
     <section aria-labelledby="recognition-mode-heading" className="flex flex-col gap-2">
       <h3
         id="recognition-mode-heading"
-        className="text-sm font-semibold uppercase tracking-wide text-slate-400"
+        className="text-sm font-semibold uppercase tracking-wide text-light-muted"
       >
         Recognition mode
       </h3>
@@ -89,13 +89,13 @@ export default function RecognitionModeToggle({
               className={[
                 'flex-1 rounded-lg border px-3 py-2 text-left transition-colors',
                 selected
-                  ? 'border-bridge-500 bg-bridge-500/15 text-slate-100'
-                  : 'border-ink-700 bg-ink-800 text-slate-300 hover:bg-ink-700',
-                disabled ? 'cursor-not-allowed opacity-40 hover:bg-ink-800' : '',
+                  ? 'border-light-blue bg-light-blue/15 text-light-text'
+                  : 'border-light-border bg-light-bg text-light-muted hover:bg-light-surface',
+                disabled ? 'cursor-not-allowed opacity-40 hover:bg-light-bg' : '',
               ].join(' ')}
             >
               <span className="block text-sm font-semibold">{option.label}</span>
-              <span className="block text-xs text-slate-400">
+              <span className="block text-xs text-light-muted">
                 {hintFor(option, info)}
               </span>
             </button>
@@ -105,7 +105,7 @@ export default function RecognitionModeToggle({
 
       {/* Provenance for whichever model is active, so the letter on screen is
           never separated from how reliable it is. */}
-      <p className="text-xs text-slate-400">
+      <p className="text-xs text-light-muted">
         {MODES.find((option) => option.id === mode)?.label}
         {' · '}
         {summarise(active)}
@@ -114,10 +114,10 @@ export default function RecognitionModeToggle({
 
       {!activeAvailable && (
         <p
-          className="rounded-lg border border-signal-warn/40 bg-signal-warn/10 p-2 text-xs text-slate-300"
+          className="rounded-lg border border-[#E37400] bg-[#E37400] p-2 text-xs text-light-muted"
           role="status"
         >
-          <strong className="text-slate-100">This mode is unavailable.</strong>{' '}
+          <strong className="text-light-text">This mode is unavailable.</strong>{' '}
           {active?.error ?? 'No model is loaded on this server.'}
         </p>
       )}
