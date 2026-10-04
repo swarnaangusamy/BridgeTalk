@@ -59,6 +59,11 @@ export function useSignCaptions({
   // --- letters -------------------------------------------------------------
   const stableLabelRef = useRef(null);
   const stableCountRef = useRef(0);
+  // Frames since movement was last seen. A hand parked in frame must stop
+  // producing captions, and motion is the only thing that distinguishes
+  // "arrived in this shape" from "has been sitting in it" — see the note on
+  // MOTION_LOOKBACK_FRAMES in the config.
+  const framesSinceMotionRef = useRef(Number.MAX_SAFE_INTEGER);
 
   const [debug, setDebug] = useState({
     motion: 0,
@@ -172,6 +177,17 @@ export function useSignCaptions({
       stillFramesRef.current = 0;
     }
 
+    if (moving) {
+      framesSinceMotionRef.current = 0;
+    } else {
+      framesSinceMotionRef.current += 1;
+    }
+
+    // Nothing is committed from a hand that has been parked. This is the gate
+    // that makes "hands resting for 30 seconds produces zero captions" true;
+    // confidence and stability both fail at it.
+    const recentlyMoved = framesSinceMotionRef.current <= SIGN.MOTION_LOOKBACK_FRAMES;
+
     // --- is this prediction worth considering at all? ----------------------
     const label = prediction?.label;
     const confidence = prediction?.confidence ?? 0;
@@ -195,6 +211,7 @@ export function useSignCaptions({
         }
       } else if (
         inMovementRef.current &&
+        recentlyMoved &&
         stillFramesRef.current >= SIGN.REST_FRAMES_TO_END_SEGMENT
       ) {
         // The movement is over. Commit its best frame, once.
@@ -204,8 +221,8 @@ export function useSignCaptions({
         }
         bestRef.current = null;
       }
-    } else if (isRealSign) {
-      // --- letters: commit on stability ------------------------------------
+    } else if (isRealSign && recentlyMoved) {
+      // --- letters: commit on stability, but only after movement ----------
       if (label === stableLabelRef.current) {
         stableCountRef.current += 1;
       } else {
@@ -225,6 +242,7 @@ export function useSignCaptions({
     setDebug({
       motion: Number(motion.toFixed(4)),
       phase: resting ? 'rest' : moving ? 'moving' : 'transition',
+      parked: !recentlyMoved,
       openSegment: segmentRef.current,
       ...countsRef.current,
     });

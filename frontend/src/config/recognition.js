@@ -57,6 +57,22 @@ export const SIGN = {
   // Frames with no hands at all before a frame counts as genuinely empty.
   // One dropped detection mid-sign is noise, not an absence.
   ABSENT_FRAMES_TO_CLEAR: 3,
+
+  // --- the parked-hand gate ------------------------------------------------
+  // A letter must have been ARRIVED AT, not merely held. Within this many
+  // frames there must have been real movement, or nothing is committed.
+  //
+  // Measured, and this is why it exists: fed a resting hand, the letter model
+  // passes the confidence and margin gates essentially always — a hand at rest
+  // IS a valid handshape, so the model is not wrong to be confident about it,
+  // and no probability threshold can separate "resting in this shape" from
+  // "signing this letter". Stability gating cannot help either: a parked hand
+  // is perfectly stable.
+  //
+  // Movement is the only signal that distinguishes the two. 20 frames at
+  // 10 FPS is 2 s, so a hand left in frame stops producing captions about two
+  // seconds after it stops moving.
+  MOTION_LOOKBACK_FRAMES: 20,
 };
 
 export const SPEECH = {

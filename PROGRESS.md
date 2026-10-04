@@ -188,3 +188,66 @@ Not covered by this run, and needing a human in a browser: the two-window
 click-through, the camera preview in the lobby, fullscreen and Keyboard Lock
 actually engaging, and a real microphone producing captions. Every layer
 beneath those is verified above.
+
+---
+
+## Measured recognition gates (Part A4)
+
+Thresholds live in `frontend/src/config/recognition.js` and were chosen by
+measuring, not guessing. Reproduce with `python ml/scripts/measure_gates.py`.
+
+Gates: **confidence ≥ 0.7**, **margin over runner-up ≥ 0.15**.
+
+### Accuracy on held-out data
+
+| | ISL words | ISL letters |
+|---|---|---|
+| Held-out samples | 149 clips | 6343 |
+| Rejected by the gates | 8 (5.4%) | 16 (0.2%) |
+| **Accuracy of accepted** | **88.65%** | **98.37%** |
+| Accuracy overall | 83.89% | 98.12% |
+
+A rejection is a *missed* caption, not a wrong one. The two matter differently:
+a miss is recoverable by signing again, a wrong caption is not.
+
+### Idle false-positive rate — the number that matters more
+
+Fed input containing no sign at all, how often do the gates let something
+through? Target is zero.
+
+| Input | ISL words | ISL letters |
+|---|---|---|
+| No hands (all zeros) | **0.0%** | **100.0%** |
+| One pose held perfectly still | **56.8%** | n/a (no motion concept) |
+| Random landmark noise | 52.2% | 81.8% |
+
+**These are worst-case numbers with motion gating removed, and they are the
+honest reason the motion gate exists.**
+
+Two things the confidence and margin gates genuinely cannot do:
+
+1. **The letter model passes all-zeros 100% of the time.** It learned that an
+   empty hand slot looks like something, because ~31% of its training hand
+   slots were legitimately empty — ISL has one-handed letters. In production
+   this cannot fire: the backend returns the neutral state without calling the
+   model when no hands are present. But it means the probability output carries
+   no information about whether a hand is there.
+
+2. **A pose held still passes 57% of the time.** A resting hand IS a valid
+   handshape, so the model is not *wrong* to be confident about it, and no
+   probability threshold separates "resting in this shape" from "signing this
+   letter". Stability gating cannot help either — a parked hand is perfectly
+   stable. This is what produced the reported "detecting M at 71% while not
+   signing".
+
+Movement is the only signal that distinguishes them, which is why
+`MOTION_LOOKBACK_FRAMES` exists: nothing is committed unless real movement
+occurred within the last 20 frames (2 s at 10 FPS). A hand left in frame stops
+producing captions about two seconds after it stops moving.
+
+**Not yet measured:** the end-to-end false-positive rate *with* motion gating
+active, because the motion gate runs in the browser against live landmark
+velocity and there is no recorded idle-webcam fixture to replay through it.
+Acceptance check A6.4 — hands resting for 30 seconds — is the manual test that
+covers it, and it needs a human at a camera.
+
