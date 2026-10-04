@@ -111,6 +111,20 @@ def _meeting_exists(meeting_code: str) -> bool:
         return meeting is not None and meeting.ended_at is None
 
 
+def _top2_margin(probabilities) -> float:
+    """Gap between the best and second-best class.
+
+    Confidence alone cannot distinguish "certain" from "cannot tell these two
+    apart": a model may be 0.72 on the winner while the runner-up sits at
+    0.70. The client requires a clear margin before committing a sign, and it
+    cannot compute one without this.
+    """
+    if probabilities is None or len(probabilities) < 2:
+        return 1.0
+    ordered = sorted(probabilities, reverse=True)
+    return float(ordered[0] - ordered[1])
+
+
 def _error(code: str, message: str) -> dict[str, Any]:
     return {"type": "error", "code": code, "message": message}
 
@@ -149,7 +163,7 @@ def _handle_static_frame(
         return _error("INVALID_MESSAGE", f"Bad landmark data: {exc}")
 
     try:
-        label, confidence, _ = predictor.predict(features)
+        label, confidence, probabilities = predictor.predict(features)
     except ModelNotLoadedError as exc:
         return _error("MODEL_NOT_LOADED", str(exc))
     except ValueError as exc:
@@ -162,6 +176,8 @@ def _handle_static_frame(
         "mode": STATIC_MODE,
         "label": result.label,
         "confidence": round(result.confidence, 4),
+        # The runner-up gap, so the client can reject near-ties.
+        "margin": round(_top2_margin(probabilities), 4),
         "stable": result.stable,
         "emitted": result.emitted,
         "sentence": result.sentence,
@@ -212,7 +228,7 @@ def _handle_isl_frame(
         return _error("INVALID_MESSAGE", f"Bad landmark data: {exc}")
 
     try:
-        label, confidence, _ = isl_predictor.predict(features)
+        label, confidence, probabilities = isl_predictor.predict(features)
     except ModelNotLoadedError as exc:
         return _error("MODEL_NOT_LOADED", str(exc))
     except ValueError as exc:
@@ -225,6 +241,8 @@ def _handle_isl_frame(
         "mode": ISL_MODE,
         "label": result.label,
         "confidence": round(result.confidence, 4),
+        # The runner-up gap, so the client can reject near-ties.
+        "margin": round(_top2_margin(probabilities), 4),
         "stable": result.stable,
         "emitted": result.emitted,
         "sentence": result.sentence,
@@ -296,7 +314,7 @@ def _handle_dynamic_frame(
         }
 
     try:
-        label, confidence, _ = dynamic_predictor.predict(window)
+        label, confidence, probabilities = dynamic_predictor.predict(window)
     except ModelNotLoadedError as exc:
         return _error("MODEL_NOT_LOADED", str(exc))
     except ValueError as exc:
@@ -309,6 +327,8 @@ def _handle_dynamic_frame(
         "mode": DYNAMIC_MODE,
         "label": result.label,
         "confidence": round(result.confidence, 4),
+        # The runner-up gap, so the client can reject near-ties.
+        "margin": round(_top2_margin(probabilities), 4),
         "stable": result.stable,
         "emitted": result.emitted,
         "sentence": result.sentence,

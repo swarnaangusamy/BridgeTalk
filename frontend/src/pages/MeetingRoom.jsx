@@ -2,8 +2,6 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 
 import HandOverlayCanvas from '../components/HandOverlayCanvas';
-import ModeSwitch from '../components/ModeSwitch';
-import SignDetectionPanel from '../components/SignDetectionPanel';
 import {
   CaptionSizeControl,
   CopyLinkButton,
@@ -12,16 +10,18 @@ import {
 } from '../components/MeetingHeaderControls';
 import InterviewModeDialog from '../components/InterviewModeDialog';
 import InterviewModeOverlay from '../components/InterviewModeOverlay';
-import SpeechControls from '../components/SpeechControls';
-import SubtitleBar from '../components/SubtitleBar';
-import TranscriptPanel from '../components/TranscriptPanel';
+import CaptionArea from '../components/CaptionArea';
+import DebugOverlay from '../components/DebugOverlay';
 import VideoTile from '../components/VideoTile';
 import { useAuth } from '../context/AuthContext';
+import { useCaptionStore } from '../hooks/useCaptionStore';
 import { useInterviewMode } from '../hooks/useInterviewMode';
+import { useSignCaptions } from '../hooks/useSignCaptions';
+import { useSpeechCaptions } from '../hooks/useSpeechCaptions';
 import { useHandLandmarker } from '../hooks/useHandLandmarker';
 import { useSignSocket } from '../hooks/useSignSocket';
-import { useSpeechToText } from '../hooks/useSpeechToText';
 import { useWebRTC } from '../hooks/useWebRTC';
+import { loadDevicePreferences } from '../services/devicePreferences';
 import { meetings as meetingsApi, transcripts as transcriptsApi } from '../services/api';
 import { toWireFormat } from '../utils/landmarkUtils';
 
@@ -50,6 +50,11 @@ export default function MeetingRoom() {
   const { code } = useParams();
   const [searchParams] = useSearchParams();
   const captionSize = useCaptionSize();
+  // ?debug=1 only. "I spoke and nothing happened" is not a reportable bug
+  // without knowing which stage died.
+  const debugEnabled = searchParams.get('debug') === '1';
+  const lastSentRef2 = useRef('—');
+  const lastReceivedRef = useRef('—');
   const navigate = useNavigate();
   const { user } = useAuth();
 
@@ -62,18 +67,24 @@ export default function MeetingRoom() {
   const [cameraError, setCameraError] = useState(null);
   const [landmarks, setLandmarks] = useState([]);
 
-  const [signDetectionOn, setSignDetectionOn] = useState(true);
+  // Sign recognition is OPT-IN and OFF by default. It used to default to true
+  // for everyone, which is why the hearing participant's resting hands were
+  // being classified as signs ("M at 71%") while they were not signing at all.
+  const [signRecognitionOn, setSignRecognitionOn] = useState(false);
+  // Captions are DISPLAY only, and on by default for everyone.
+  const [captionsVisible, setCaptionsVisible] = useState(true);
   const [recognitionMode, setRecognitionMode] = useState('static');
   const [micOn, setMicOn] = useState(true);
   const [cameraOn, setCameraOn] = useState(true);
-  const [speechOn, setSpeechOn] = useState(false);
   // en-IN by default: the demo is in India, and the Indian English
   // acoustic model recognises local accents markedly better than en-US.
   const [speechLanguage, setSpeechLanguage] = useState('en-IN');
-  const [speechProvider, setSpeechProvider] = useState('webspeech');
+  // 'auto' prefers the browser engine, which streams interim text word by
+  // word. Whisper only emits when you pause, which reads as a dead feature if
+  // it is what you get by default in Chrome.
+  const [speechEngine, setSpeechEngine] = useState('auto');
   const [transcriptCollapsed, setTranscriptCollapsed] = useState(false);
 
-  const [subtitle, setSubtitle] = useState(null);
   const [transcriptLines, setTranscriptLines] = useState([]);
 
   // --- meeting record ------------------------------------------------------
@@ -197,49 +208,47 @@ export default function MeetingRoom() {
     }
   }, [localStream]);
 
-  // --- translation: sign -> text -------------------------------------------
-  const handleIncomingSubtitle = useCallback((message) => {
-    setSubtitle({
-      text: message.text,
-      speaker: message.from?.name ?? 'Participant',
-      source: message.source,
-      isFinal: message.is_final !== false,
-    });
-
-    // Only final lines join the permanent record. Interim speech is revised
-    // word by word, so persisting it would fill the transcript with fragments.
-    if (message.source === 'speech' && message.is_final === false) return;
-
-    setTranscriptLines((current) => [
-      ...current,
-      {
-        id: `remote-${Date.now()}-${Math.random()}`,
-        speaker: message.from?.name ?? 'Participant',
-        source: message.source,
-        text: message.text,
-        confidence: message.confidence ?? null,
-        timestamp: new Date().toISOString(),
-      },
-    ]);
-  }, []);
+  // --- captions ------------------------------------------------------------
+  // ONE store for both sources and both participants. Every caption — mine and
+  // theirs, sign and speech — arrives through the socket and is applied here
+  // by segment id. Previously each side rendered its own words from local state
+  // and the other person's from the socket, which is why the two screens
+  // disagreed about what had been said.
+  const { captions, applyCaption, clearCaptions } = useCaptionStore();
 
   const {
     status: signSocketStatus,
     prediction,
-    sentence,
     serverError: signError,
     modelInfo,
     dynamicModelInfo,
     islModelInfo,
     sendLandmarks,
-    sendSpeech,
-    clearSentence,
-    backspace,
+    sendCaption,
   } = useSignSocket({
     meetingCode: code,
     enabled: Boolean(meeting),
-    onSubtitle: handleIncomingSubtitle,
+    onCaption: applyAndRecord,
   });
+
+  // Producers hand captions to the socket. They never touch the store
+  // directly: the round trip through the server is what guarantees both
+  // participants see identical text, and it is also what persists it.
+  const emitCaption = useCallback(
+    (caption) => {
+      lastSentRef2.current = `${caption.source}/${caption.isFinal ? 'final' : 'interim'}: ${caption.text.slice(0, 28)}`;
+      sendCaption(caption);
+    },
+    [sendCaption],
+  );
+
+  const applyAndRecord = useCallback(
+    (event) => {
+      lastReceivedRef.current = `${event.source}/${event.is_final ? 'final' : 'interim'}: ${(event.text ?? '').slice(0, 28)}`;
+      applyCaption(event);
+    },
+    [applyCaption],
+  );
 
   // One hand for ASL fingerspelling, two for ISL fingerspelling and word signs.
   // Their features have a slot per hand, and tracking only one would leave half
@@ -248,11 +257,18 @@ export default function MeetingRoom() {
   const { detect, status: landmarkerStatus, error: landmarkerError, isReady } =
     useHandLandmarker({
       numHands: recognitionMode === 'static' ? 1 : 2,
-      enabled: signDetectionOn,
+      enabled: signRecognitionOn,
     });
 
   useEffect(() => {
-    if (!localStream || !isReady || !signDetectionOn || !cameraOn) return undefined;
+    // Gated on the camera as well as the sign toggle. Tracking a released
+    // camera is what left a frozen skeleton on screen.
+    if (!localStream || !isReady || !signRecognitionOn || !cameraOn) {
+      // Clear any skeleton left from the last frame we did process, so the
+      // overlay cannot outlive the video it was drawn from.
+      setLandmarks([]);
+      return undefined;
+    }
 
     let active = true;
     const tick = () => {
@@ -287,112 +303,65 @@ export default function MeetingRoom() {
       active = false;
       cancelAnimationFrame(rafRef.current);
     };
-  }, [localStream, isReady, signDetectionOn, cameraOn, detect, sendLandmarks, recognitionMode]);
-
-  // Show each accepted letter locally, and persist completed WORDS.
-  //
-  // Persisting per letter would write a database row for every character and
-  // produce a transcript that reads "H", "E", "L", "L", "O" — technically
-  // accurate and completely useless to read back. The word boundary (a `space`
-  // being emitted) is the natural unit, and it matches how the speech side
-  // persists whole final phrases rather than partial ones.
-  const lastEmittedRef = useRef(null);
-  const persistedUpToRef = useRef(0);
-
-  useEffect(() => {
-    if (!prediction?.emitted || !meeting) return;
-
-    // React can re-run this for the same prediction object; the signature
-    // makes the effect idempotent.
-    const signature = `${prediction.emitted}-${prediction.sentence}`;
-    if (lastEmittedRef.current === signature) return;
-    lastEmittedRef.current = signature;
-
-    setSubtitle({
-      text: prediction.sentence,
-      speaker: user?.name ?? 'You',
-      source: 'sign',
-      isFinal: true,
-    });
-
-    if (prediction.emitted !== 'space') return;
-
-    const completed = prediction.sentence.slice(persistedUpToRef.current).trim();
-    persistedUpToRef.current = prediction.sentence.length;
-    if (!completed) return;
-
-    setTranscriptLines((current) => [
-      ...current,
-      {
-        id: `local-sign-${Date.now()}`,
-        speaker: user?.name ?? 'You',
-        source: 'sign',
-        text: completed,
-        confidence: prediction.confidence ?? null,
-        timestamp: new Date().toISOString(),
-      },
-    ]);
-
-    transcriptsApi
-      .append({
-        meetingId: meeting.id,
-        source: 'sign',
-        content: completed,
-        confidence: prediction.confidence ?? null,
-      })
-      .catch(() => {
-        // A failed write must not interrupt the conversation — the word is
-        // already on screen, which is what the participants actually need.
-      });
-  }, [prediction, meeting, user]);
-
-  // --- translation: speech -> text -----------------------------------------
-  const handleSpeechResult = useCallback(
-    ({ text, isFinal, confidence }) => {
-      if (!text) return;
-
-      // Relay to the other participant through the inference socket, which is
-      // the meeting's text channel for both translation directions. Interim
-      // results are sent too, so their caption updates word by word rather
-      // than appearing in silent bursts at the end of each sentence.
-      sendSpeech(text, isFinal);
-
-      setSubtitle({ text, speaker: user?.name ?? 'You', source: 'speech', isFinal });
-
-      if (!isFinal || !meeting) return;
-
-      setTranscriptLines((current) => [
-        ...current,
-        {
-          id: `local-speech-${Date.now()}`,
-          speaker: user?.name ?? 'You',
-          source: 'speech',
-          text,
-          confidence: null,
-          timestamp: new Date().toISOString(),
-        },
-      ]);
-
-      transcriptsApi
-        .append({ meetingId: meeting.id, source: 'speech', content: text })
-        .catch(() => {
-          // A failed persist must not break the live caption — the words are
-          // already on screen, which is what the conversation needs.
-        });
-    },
-    [meeting, user, sendSpeech],
-  );
-
-  const speech = useSpeechToText({
-    enabled: speechOn,
-    language: speechLanguage,
-    provider: speechProvider,
-    meetingCode: code,
-    onResult: handleSpeechResult,
+  }, [localStream, isReady, signRecognitionOn, cameraOn, detect, sendLandmarks, recognitionMode]);
+  // --- producing sign captions ---------------------------------------------
+  // Segmentation lives in useSignCaptions, not in a server-side smoother and
+  // not in this component. The old code committed a word every time a 2.5 s
+  // cooldown lapsed, which is why one held pose produced "warm warm warm" —
+  // a timer cannot tell "still signing this" from "signed it again". The hook
+  // watches hand MOTION instead, commits once per movement, and refuses to
+  // repeat a token until the hands have returned to rest.
+  const signCaptions = useSignCaptions({
+    enabled: Boolean(signRecognitionOn && cameraOn && meeting),
+    mode: recognitionMode,
+    prediction,
+    landmarks,
+    onCaption: emitCaption,
   });
 
-  // The hook already starts and stops itself from `enabled`; calling start()
-  // again here would race it. Kept as a single source of truth deliberately.
+  // --- producing speech captions -------------------------------------------
+  // Keyed to ONE thing: is my microphone unmuted. Not to a panel toggle.
+  //
+  // Recognition used to be gated on a `speechOn` flag that defaulted to OFF,
+  // so a participant who never found that toggle produced no captions at all —
+  // while the panel still said "listening", because that reported the
+  // recogniser object's state rather than whether any audio reached it. That
+  // is the reported "spoke and nothing happened".
+  //
+  // Producing is now automatic; the captions button only controls DISPLAY.
+  // Nobody's speech should go unrecognised because they chose not to look at
+  // captions themselves.
+  const speech = useSpeechCaptions({
+    enabled: Boolean(micOn && meeting),
+    engine: speechEngine,
+    language: speechLanguage,
+    meetingCode: code,
+    onCaption: emitCaption,
+  });
+
+  // --- keyboard shortcuts --------------------------------------------------
+  // Ctrl/Cmd+D microphone, Ctrl/Cmd+E camera, C captions. Skipped while focus
+  // is in a text field, or typing a meeting code would toggle the mic.
+  useEffect(() => {
+    const handler = (event) => {
+      const tag = event.target?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+
+      const modifier = event.ctrlKey || event.metaKey;
+      if (modifier && event.key.toLowerCase() === 'd') {
+        event.preventDefault();
+        toggleMic();
+      } else if (modifier && event.key.toLowerCase() === 'e') {
+        event.preventDefault();
+        toggleCamera();
+      } else if (!modifier && event.key.toLowerCase() === 'c') {
+        setCaptionsVisible((value) => !value);
+      }
+    };
+
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [toggleCamera]);
 
   // --- Interview Mode ------------------------------------------------------
   // The mode lives on the MEETING RECORD, not in local state, so a participant
@@ -457,7 +426,14 @@ export default function MeetingRoom() {
   }, [code, interviewOn, isHost]);
 
   // --- the call ------------------------------------------------------------
-  const { remoteStream, connectionState, peer, error: rtcError, hangUp } = useWebRTC({
+  const {
+    remoteStream,
+    connectionState,
+    peer,
+    error: rtcError,
+    hangUp,
+    replaceVideoTrack,
+  } = useWebRTC({
     meetingCode: code,
     localStream,
     enabled: Boolean(localStream && meeting),
@@ -475,13 +451,69 @@ export default function MeetingRoom() {
     setMicOn(next);
   }
 
-  function toggleCamera() {
-    const next = !cameraOn;
-    localStream?.getVideoTracks().forEach((track) => {
-      track.enabled = next;
-    });
-    setCameraOn(next);
-  }
+  /**
+   * Turn the camera genuinely on or off.
+   *
+   * THE BUG THIS FIXES
+   * ------------------
+   * This used to set `track.enabled = false`, which keeps the hardware open,
+   * keeps the indicator light on, and merely transmits black frames. Two
+   * things went wrong as a result:
+   *
+   *   * the tile went black while the camera was still demonstrably running,
+   *     so the button said "Turn camera on" about a camera that was on;
+   *   * the detection loop early-returned on !cameraOn WITHOUT clearing
+   *     `landmarks`, so the last hand skeleton stayed in React state and kept
+   *     drawing over the black tile forever. That is exactly the reported
+   *     "both tiles black, yet the skeleton is drawn".
+   *
+   * Off now STOPS the track and releases the device. On re-acquires it and
+   * swaps it into the existing peer connection with replaceTrack, so the
+   * remote side sees the stream resume without a renegotiation.
+   */
+  const toggleCamera = useCallback(async () => {
+    if (cameraOn) {
+      // Clear the overlay FIRST. Otherwise a stale skeleton is visible for the
+      // frame or two before React re-renders without it.
+      setLandmarks([]);
+
+      localStream?.getVideoTracks().forEach((track) => {
+        track.stop();
+        localStream.removeTrack(track);
+      });
+      await replaceVideoTrack(null);
+      setCameraOn(false);
+      return;
+    }
+
+    try {
+      const preferences = loadDevicePreferences();
+      const fresh = await navigator.mediaDevices.getUserMedia({
+        video: preferences?.cameraId
+          ? { deviceId: { exact: preferences.cameraId }, width: { ideal: 640 }, height: { ideal: 480 } }
+          : { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' },
+        audio: false,
+      });
+
+      const [track] = fresh.getVideoTracks();
+      if (!track) throw new Error('No video track');
+
+      localStream?.addTrack(track);
+      await replaceVideoTrack(track);
+
+      if (localVideoRef.current && localStream) {
+        localVideoRef.current.srcObject = localStream;
+        await localVideoRef.current.play().catch(() => {});
+      }
+      setCameraOn(true);
+    } catch (cause) {
+      setCameraError(
+        cause?.name === 'NotAllowedError'
+          ? 'Camera permission denied. Allow it in your browser, then try again.'
+          : `Could not restart the camera: ${cause?.message ?? cause}`,
+      );
+    }
+  }, [cameraOn, localStream, replaceVideoTrack]);
 
   async function leaveMeeting() {
     hangUp();
@@ -526,6 +558,23 @@ export default function MeetingRoom() {
 
       {/* Covers the meeting while they are away or out of fullscreen, so
           leaving costs them the view rather than being free. */}
+      {debugEnabled && (
+        <DebugOverlay
+          micTrack={localStream?.getAudioTracks()[0]?.readyState ?? 'none'}
+          cameraTrack={localStream?.getVideoTracks()[0]?.readyState ?? 'none'}
+          speech={{
+            engineActive: speech.engineActive,
+            state: speech.state,
+            lastInterim: speech.lastInterim,
+            error: speech.error,
+          }}
+          sign={signCaptions.debug}
+          socketStatus={signSocketStatus}
+          lastSent={lastSentRef2.current}
+          lastReceived={lastReceivedRef.current}
+        />
+      )}
+
       {interview.mustBlock && (
         <InterviewModeOverlay
           awayCount={interview.awayCount}
@@ -591,7 +640,7 @@ export default function MeetingRoom() {
               mirrored
               placeholder={cameraError ?? 'Starting camera…'}
             >
-              {signDetectionOn && (
+              {signRecognitionOn && (
                 <HandOverlayCanvas
                   landmarks={landmarks}
                   mirrored
@@ -607,94 +656,102 @@ export default function MeetingRoom() {
             />
           </div>
 
-          <SubtitleBar subtitle={subtitle} textClassName={captionSize.className} />
+          <CaptionArea
+            captions={captions}
+            size={captionSize.size}
+            visible={captionsVisible}
+          />
 
           {/* --- control bar ------------------------------------------- */}
+          {/* Producing captions is automatic and keyed to the microphone and
+              camera. These buttons control the DEVICES and the DISPLAY, never
+              whether recognition runs — that separation is the whole point of
+              Part A1. */}
           <div className="flex flex-wrap items-center gap-2 rounded-xl border border-ink-700 bg-ink-800 p-3">
-            <button type="button" onClick={toggleMic} aria-pressed={micOn}
-                    className="rounded-lg border border-ink-700 px-3 py-2 text-sm hover:bg-ink-700">
-              {micOn ? 'Mute mic' : 'Unmute mic'}
-            </button>
-            <button type="button" onClick={toggleCamera} aria-pressed={cameraOn}
-                    className="rounded-lg border border-ink-700 px-3 py-2 text-sm hover:bg-ink-700">
-              {cameraOn ? 'Turn camera off' : 'Turn camera on'}
-            </button>
-            <button type="button" onClick={() => setSignDetectionOn((v) => !v)}
-                    aria-pressed={signDetectionOn}
-                    className="rounded-lg border border-ink-700 px-3 py-2 text-sm hover:bg-ink-700">
-              Sign detection: {signDetectionOn ? 'on' : 'off'}
-            </button>
-            <button type="button" onClick={() => setSpeechOn((v) => !v)}
-                    aria-pressed={speechOn} disabled={!speech.isSupported}
-                    title={speech.isSupported ? undefined : 'No speech engine works in this browser'}
-                    className="rounded-lg border border-ink-700 px-3 py-2 text-sm hover:bg-ink-700 disabled:opacity-50">
-              Speech captions: {speechOn ? 'on' : 'off'}
+            <button
+              type="button"
+              onClick={toggleMic}
+              aria-pressed={micOn}
+              title="Microphone (Ctrl+D). Speech captions follow this."
+              className={`rounded-full border px-4 py-2 text-sm ${
+                micOn ? 'border-ink-700 hover:bg-ink-700' : 'border-signal-bad bg-signal-bad/20 text-signal-bad'
+              }`}
+            >
+              {micOn ? 'Mute' : 'Unmute'}
             </button>
 
-            {!speech.isSupported && (
-              <span className="text-xs text-slate-400">
-                Speech captions need Chrome or Edge.
+            <button
+              type="button"
+              onClick={toggleCamera}
+              aria-pressed={cameraOn}
+              title="Camera (Ctrl+E)"
+              className={`rounded-full border px-4 py-2 text-sm ${
+                cameraOn ? 'border-ink-700 hover:bg-ink-700' : 'border-signal-bad bg-signal-bad/20 text-signal-bad'
+              }`}
+            >
+              {cameraOn ? 'Camera off' : 'Camera on'}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setCaptionsVisible((value) => !value)}
+              aria-pressed={captionsVisible}
+              title="Show or hide captions (C). Does not affect what others receive."
+              className={`rounded-full border px-4 py-2 text-sm ${
+                captionsVisible
+                  ? 'border-bridge-500 bg-bridge-500/20 text-bridge-400'
+                  : 'border-ink-700 hover:bg-ink-700'
+              }`}
+            >
+              CC
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setSignRecognitionOn((value) => !value)}
+              aria-pressed={signRecognitionOn}
+              disabled={!cameraOn}
+              title={cameraOn ? 'Sign recognition' : 'Turn on your camera to sign'}
+              className={`rounded-full border px-4 py-2 text-sm disabled:opacity-40 ${
+                signRecognitionOn
+                  ? 'border-bridge-500 bg-bridge-500/20 text-bridge-400'
+                  : 'border-ink-700 hover:bg-ink-700'
+              }`}
+            >
+              🤟 Sign
+            </button>
+
+            {isHost && (
+              <button
+                type="button"
+                onClick={toggleInterviewMode}
+                aria-pressed={interviewOn}
+                className={`rounded-full border px-4 py-2 text-sm ${
+                  interviewOn
+                    ? 'border-signal-warn bg-signal-warn/20 text-signal-warn'
+                    : 'border-ink-700 hover:bg-ink-700'
+                }`}
+              >
+                Interview mode
+              </button>
+            )}
+
+            <span className="ml-auto text-xs text-slate-400">
+              {speech.engineActive
+                ? `speech: ${speech.engineActive} · ${speech.state}`
+                : 'speech: unavailable in this browser'}
+            </span>
+
+            {speech.error && (
+              <span className="text-xs text-signal-bad" role="alert">
+                {speech.error}
               </span>
             )}
-            {speech.error && (
-              <span className="text-xs text-signal-bad">{speech.error}</span>
+            {speech.notice && (
+              <span className="text-xs text-signal-warn">{speech.notice}</span>
             )}
           </div>
         </div>
-
-        {/* --- right column ---------------------------------------------- */}
-        <aside className="flex flex-col gap-4">
-          <ModeSwitch
-            enabled={interviewOn}
-            isHost={isHost}
-            awayCount={interview.awayCount}
-            isAway={interview.isAway}
-            capabilities={interview.capabilities}
-            keyboardLocked={interview.keyboardLocked}
-            violationLog={violationLog}
-            maxViolations={MAX_VIOLATIONS}
-            onToggle={toggleInterviewMode}
-          />
-
-          <SignDetectionPanel
-            status={signSocketStatus}
-            prediction={prediction}
-            sentence={sentence}
-            serverError={signError}
-            modelInfo={modelInfo}
-            dynamicModelInfo={dynamicModelInfo}
-            islModelInfo={islModelInfo}
-            handDetected={handDetected}
-            mode={recognitionMode}
-            onModeChange={setRecognitionMode}
-            onClear={clearSentence}
-            onBackspace={backspace}
-          />
-
-          <SpeechControls
-            enabled={speechOn}
-            onToggle={() => setSpeechOn((value) => !value)}
-            providerId={speech.providerId}
-            onProviderChange={setSpeechProvider}
-            language={speechLanguage}
-            onLanguageChange={setSpeechLanguage}
-            state={speech.state}
-            providerName={speech.providerName}
-            providerNote={speech.providerNote}
-            providesInterim={speech.providesInterim}
-            notice={speech.notice}
-            error={speech.error}
-          />
-
-          <div className="min-h-[18rem] flex-1">
-            <TranscriptPanel
-              lines={transcriptLines}
-              meetingId={meeting?.id}
-              collapsed={transcriptCollapsed}
-              onToggle={() => setTranscriptCollapsed((v) => !v)}
-            />
-          </div>
-        </aside>
       </div>
 
       {landmarkerStatus === 'loading' && (

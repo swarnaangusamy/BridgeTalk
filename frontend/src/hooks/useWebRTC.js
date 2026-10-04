@@ -75,6 +75,38 @@ const ICE_SERVERS = [
 
 export function useWebRTC({ meetingCode, localStream, enabled = true }) {
   const peerRef = useRef(null);
+
+  /**
+   * Swap the outgoing video track without renegotiating.
+   *
+   * Needed because turning the camera off now genuinely STOPS the track
+   * rather than just disabling it — `enabled = false` keeps the hardware open
+   * and the indicator light on, which is not "off" in any sense a user means.
+   *
+   * replaceTrack is the right tool: it changes what the existing sender
+   * transmits, so there is no new offer/answer round trip and the remote peer
+   * sees the stream continue rather than drop and restart.
+   *
+   * Passing null makes the sender transmit nothing, which is what the remote
+   * side should see while the camera is released.
+   */
+  const replaceVideoTrack = useCallback(async (track) => {
+    const connection = peerRef.current;
+    if (!connection) return false;
+
+    const sender = connection.getSenders().find((s) => s.track?.kind === 'video')
+      ?? connection.getSenders().find((s) => s.track === null);
+    if (!sender) return false;
+
+    try {
+      await sender.replaceTrack(track ?? null);
+      return true;
+    } catch {
+      // Older browsers, or a sender in a state that refuses the swap. The
+      // local camera state is still correct; only the remote view is stale.
+      return false;
+    }
+  }, []);
   const socketRef = useRef(null);
   // ICE candidates can arrive before the remote description is set, and
   // addIceCandidate throws if it does. They are queued here and flushed once
@@ -271,5 +303,6 @@ export function useWebRTC({ meetingCode, localStream, enabled = true }) {
     error,
     hangUp,
     isConnected: connectionState === 'connected',
+    replaceVideoTrack,
   };
 }

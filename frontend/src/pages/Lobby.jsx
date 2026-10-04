@@ -3,6 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 
 import { useAuth } from '../context/AuthContext';
 import { useMediaDevices } from '../hooks/useMediaDevices';
+import { saveDevicePreferences } from '../services/devicePreferences';
 import { meetings as meetingsApi } from '../services/api';
 
 /**
@@ -140,16 +141,25 @@ export default function Lobby() {
     setJoining(true);
     try {
       await meetingsApi.join(code);
-      // The chosen devices are handed to the meeting room through the URL, so
-      // a reload inside the meeting keeps them rather than silently reverting
-      // to the system default.
-      const params = new URLSearchParams();
-      if (cameraId) params.set('camera', cameraId);
-      if (microphoneId) params.set('mic', microphoneId);
-      if (!cameraOn) params.set('cameraOff', '1');
-      if (!micOn) params.set('micOff', '1');
-      const query = params.toString();
-      navigate(`/meeting/${encodeURIComponent(code)}${query ? `?${query}` : ''}`);
+
+      // Device choices go to SESSION STORAGE, never the URL.
+      //
+      // A deviceId is a stable hardware identifier. Putting it in the join URL
+      // meant it was copied into chat messages, kept in browser history, and
+      // sent in Referer headers — a fingerprintable detail about the user's
+      // machine leaking out of a link they were encouraged to share.
+      //
+      // Session storage also survives a reload inside the meeting, which is
+      // the behaviour the URL was there for, and is cleared when the tab
+      // closes, which is the right lifetime for "devices for this meeting".
+      saveDevicePreferences({
+        cameraId,
+        microphoneId,
+        cameraOn,
+        micOn,
+      });
+
+      navigate(`/meeting/${encodeURIComponent(code)}`);
     } catch (cause) {
       setJoining(false);
       setError(cause.message ?? 'Could not join this meeting');
