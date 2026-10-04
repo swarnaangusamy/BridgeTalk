@@ -1,21 +1,27 @@
 # ============================================================================
-# BridgeTalk — MySQL only, optional convenience.
+# BridgeTalk — the whole stack: MySQL, backend, frontend.
 #
-# This file exists so you can get a database without installing MySQL locally.
-# It is NOT required: the documented path for this project is MySQL Workbench
-# on your own machine, and the review demo runs that way.
+#   docker compose up -d --build     build and start everything
+#   docker compose logs -f backend   watch the models load (~60s first time)
+#   docker compose down              stop (data survives in the named volume)
+#   docker compose down -v           stop AND delete all data
 #
-#   docker compose up -d        start MySQL in the background
-#   docker compose logs -f db   watch it come up
-#   docker compose down         stop it (data survives in the named volume)
-#   docker compose down -v      stop it AND delete all data
+# Then open http://localhost:5173
 #
-# With this running, set in .env:
-#   DATABASE_URL=mysql+pymysql://bridgetalk:bridgetalk_dev@localhost:3306/bridgetalk
+#   docker compose up -d db          just the database, for local development
 #
-# The credentials below are deliberately throwaway development values. They are
-# safe to commit precisely because this container is only ever reachable from
-# your own machine. Never reuse them anywhere real.
+# THE CREDENTIALS BELOW ARE THROWAWAY DEVELOPMENT VALUES. They are safe to
+# commit precisely because these containers are only reachable from your own
+# machine. For anything real, override them with a .env file — compose reads
+# one automatically — and never reuse these.
+#
+# A NOTE ON HTTPS, WHICH THIS COMPOSE FILE DOES NOT PROVIDE
+# ---------------------------------------------------------
+# getUserMedia, the Web Speech API and the Keyboard Lock API all require a
+# secure context. http://localhost counts as secure, so this stack works on one
+# machine. It will NOT work from another device on your network over
+# http://192.168.x.x — the camera will simply never start. A real deployment
+# needs TLS in front of this, with wss:// for the WebSockets. See the README.
 # ============================================================================
 
 services:
@@ -47,6 +53,64 @@ services:
       timeout: 5s
       retries: 20
       start_period: 30s
+
+  # ------------------------------------------------------------------------
+  backend:
+    build:
+      # Repository root, not backend/: the app imports normalisation shared
+      # with the training scripts and reads ml/models/. A narrower context
+      # cannot see either.
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: bridgetalk-backend
+    restart: unless-stopped
+    environment:
+      # Host is `db`, the service name — compose resolves it on its network.
+      # Using localhost here is the classic container mistake: it resolves to
+      # the backend container itself, which has no database.
+      DATABASE_URL: mysql+pymysql://bridgetalk:bridgetalk_dev@db:3306/bridgetalk
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change_me_in_production_this_is_a_dev_default}
+      JWT_ALGORITHM: HS256
+      ACCESS_TOKEN_EXPIRE_MINUTES: 1440
+      BACKEND_HOST: 0.0.0.0
+      BACKEND_PORT: 8000
+      # The frontend is served from :5173 by nginx, so that is the only origin
+      # allowed to call the API. Not "*": allow_credentials with a wildcard is
+      # rejected by browsers anyway.
+      CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
+      WHISPER_MODEL_SIZE: base
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mounted rather than copied: the Whisper model is 141 MB and the image
+      # should not carry it. Absent on first run, in which case the backend
+      # starts anyway and reports MODEL_NOT_LOADED for the Whisper provider
+      # only — Web Speech, which is the default, needs nothing.
+      - ./ml/models/whisper:/app/ml/models/whisper:ro
+    depends_on:
+      db:
+        # Waits for the healthcheck, not just for the container to exist.
+        # Without this the backend starts first, fails to connect, and exits.
+        condition: service_healthy
+
+  # ------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # Vite inlines these AT BUILD TIME; they are not read when the
+        # container starts. Changing them requires a rebuild, not a restart.
+        VITE_API_BASE_URL: http://localhost:8000
+        VITE_WS_BASE_URL: ws://localhost:8000
+    container_name: bridgetalk-frontend
+    restart: unless-stopped
+    ports:
+      # 5173 on the host to match the local dev port, so the documented URL
+      # and the CORS origin are the same either way.
+      - "5173:80"
+    depends_on:
+      - backend
 
 volumes:
   bridgetalk_mysql_data:

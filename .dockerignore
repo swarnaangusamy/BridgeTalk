@@ -1,0 +1,28 @@
+# Build context hygiene. Without this the backend image would try to copy the
+# raw datasets — tens of gigabytes — and the build would appear to hang while
+# Docker streamed them to the daemon.
+.git
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+node_modules
+frontend/dist
+frontend/node_modules
+
+# Datasets are only needed to TRAIN. Serving needs ml/models/ and nothing else.
+ml/data/
+ml/models/whisper/
+
+# Secrets never enter an image.
+.env
+.env.*
+!.env.example
+kaggle.json
+
+docs/images/
+*.log
