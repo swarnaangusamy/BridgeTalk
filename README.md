@@ -158,8 +158,8 @@ graph TB
     end
 
     subgraph Browser2["Browser — hearing participant"]
-        SUB["SubtitleBar + TranscriptPanel"]
-        STT["useSpeechToText<br/>Web Speech API"]
+        SUB["CaptionRail + LiveTranscriptPanel"]
+        STT["useSpeechCaptions<br/>Web Speech API or Whisper"]
         RTC2["useWebRTC"]
     end
 
@@ -249,14 +249,18 @@ Tracing one letter from hand to screen. File and function named at each step.
     stable, sentence, latency_ms}` back to the signer. Median 6.2 ms.
 
 11. **Broadcast.** If a letter was *accepted*, `inference_manager.broadcast()`
-    sends a `subtitle` message to the other participant — accepted letters
-    only, never per-frame flicker.
+    sends a `caption` message to EVERY participant including the sender —
+    accepted tokens only, never per-frame flicker. One protocol serves both
+    directions; see section 7.9.
 
-12. **Display.** The hearing participant's
-    [`SubtitleBar.jsx`](frontend/src/components/SubtitleBar.jsx) shows the text
-    in an `aria-live` region, and
-    [`TranscriptPanel.jsx`](frontend/src/components/TranscriptPanel.jsx) appends
-    it to the running record.
+12. **Display.** Every participant's
+    [`CaptionRail.jsx`](frontend/src/components/meeting/CaptionRail.jsx) shows
+    the text in an `aria-live` region, replacing the line with that
+    `segment_id` rather than appending — which is what stops a caption growing
+    into "warm warm warm". The running record is in
+    [`LiveTranscriptPanel.jsx`](frontend/src/components/meeting/LiveTranscriptPanel.jsx),
+    which reads the persisted rows from the database rather than this list, so
+    it agrees with the exported file.
 
 13. **Persistence.** At a word boundary (`space`), `MeetingRoom.jsx` posts the
     completed word to `POST /api/transcripts`, which writes it to MySQL.
@@ -397,7 +401,9 @@ recognition. For a tool handling private conversations that is a genuine privacy
 cost, and it sits oddly beside our "video never leaves your machine" claim for
 the sign direction. Whisper is the documented upgrade path.
 
-*Key files:* [`useSpeechToText.js`](frontend/src/hooks/useSpeechToText.js).
+*Key files:* [`useSpeechCaptions.js`](frontend/src/hooks/useSpeechCaptions.js),
+and [`services/stt/`](frontend/src/services/stt/) which puts Web Speech and
+Whisper behind one interface.
 
 ---
 
@@ -998,7 +1004,7 @@ BridgeTalk/
 │   │   ├── config.py       pydantic-settings; the only reader of .env
 │   │   ├── database.py     engine + session factory
 │   │   └── main.py         app, CORS, routers, model load at startup
-│   ├── tests/              136 tests
+│   ├── tests/              258 tests
 │   └── requirements.txt    every version pinned
 │
 ├── ml/
@@ -1014,16 +1020,35 @@ BridgeTalk/
 │   └── models/             .keras (gitignored) + JSON side-cars (committed)
 │
 ├── frontend/
+│   ├── .eslintrc.cjs       no-use-before-define as an ERROR — see section 17
+│   ├── vitest.config.js    jsdom render tests
+│   ├── tailwind.config.js  the two palettes, with contrast ratios recorded
 │   ├── src/
-│   │   ├── pages/          Login, Dashboard, MeetingRoom, History, SignDetection
-│   │   ├── components/     VideoTile, SubtitleBar, TranscriptPanel,
-│   │   │                   SignDetectionPanel, HandOverlayCanvas, ModeSwitch,
-│   │   │                   ErrorBoundary
+│   │   ├── pages/          Login, Home, Lobby, MeetingRoom, MeetingEnded,
+│   │   │                   History, Transcript, SignDetection
+│   │   ├── components/
+│   │   │   ├── ui/         the design system: Icon, Avatar, IconButton,
+│   │   │   │               Dialog, Menu, TextField, Select, ToastHost,
+│   │   │   │               States, TopBar, Logo
+│   │   │   ├── meeting/    Stage, MeetingTile, CaptionRail, ControlBar,
+│   │   │   │               SidePanel, DetailsPanel, PeoplePanel,
+│   │   │   │               LiveTranscriptPanel, SettingsDialog
+│   │   │   └── …           HandOverlayCanvas, DebugOverlay, ErrorBoundary,
+│   │   │                   InterviewModeDialog / Overlay
 │   │   ├── hooks/          useHandLandmarker, useSignSocket, useWebRTC,
-│   │   │                   useSpeechToText, useFocusMonitor
-│   │   ├── services/api.js the only module that calls fetch
+│   │   │                   useSignCaptions, useSpeechCaptions,
+│   │   │                   useCaptionStore, useScreenShare, useInterviewMode,
+│   │   │                   useMediaDevices, useMicLevel,
+│   │   │                   useMeetingPreferences, useClock
+│   │   ├── services/
+│   │   │   ├── api.js      the only module that calls fetch
+│   │   │   ├── stt/        Web Speech and Whisper behind one interface
+│   │   │   └── devicePreferences.js  sessionStorage, never the URL
+│   │   ├── config/         recognition.js — every threshold, in one file
 │   │   ├── context/        AuthContext
+│   │   ├── test/           setup.js (browser API stubs), pages.test.jsx
 │   │   └── utils/          landmarkUtils.js — MUST match normalization.py
+│   │                       formatters.js — dates, durations, meeting codes
 │   └── public/models/      MediaPipe assets              (gitignored)
 │
 ├── database/               schema.sql, seed.sql
@@ -1059,41 +1084,111 @@ BridgeTalk/
 
 ## 17. Testing
 
+There are two suites, and they answer different questions.
+
 ```bash
-source .venv/bin/activate
-pytest backend/tests -v
+# backend — the protocol, the database, the maths
+source .venv/bin/activate && pytest backend/tests -q
+
+# frontend — does every page actually render, and does it lint
+cd frontend && npm run lint && npm test
 ```
 
-**136 tests**, all passing, in ~24 seconds. They run against throwaway
-in-memory SQLite, so no MySQL is needed and no real data can be touched.
+```
+pytest backend/tests -q      258 passed, 2 skipped   (~40s)
+npm run lint                 0 errors, 6 warnings
+npm test                     13 passed               (~2s)
+npx vite build               built in ~2.6s
+```
+
+### Backend — 258 tests
+
+They run against throwaway in-memory SQLite, so no MySQL is needed and no real
+data can be touched.
 
 | File | Covers |
 |---|---|
 | `test_auth.py` | Registration, login, duplicate emails, expired/forged/deleted-user tokens, password hashing, the identical-error rule for unknown email vs wrong password |
-| `test_meetings.py` | Meeting CRUD, join/leave/end, attendance logging, membership boundaries, transcript CRUD and export |
+| `test_meetings.py` | Meeting CRUD, join/leave/end, attendance logging, membership boundaries, history payload shape, history search, and a query-count guard |
+| `test_captions.py` | The one caption protocol: interim replaces, final persists, one row per `segment_id`, and that no row carries accumulated history |
+| `test_transcripts.py` | Transcript CRUD, TXT and PDF export, member-only access |
 | `test_smoothing.py` | The full smoothing algorithm against a synthetic prediction stream with injected time — no webcam or model needed |
 | `test_normalization_parity.py` | Python vs JavaScript agreement to 1e-6, plus the invariants (wrist at origin, furthest landmark at 1.0, translation and scale invariance) |
-| `test_websockets.py` | Socket auth, message validation, the should-initiate rule, verbatim relay, speech relay |
+| `test_websockets.py` | Socket auth, message validation, the should-initiate rule, verbatim relay |
 | `test_focus_events.py` | Interview Mode logging, host-only reads, opt-in enforcement |
 | `test_schema_parity.py` | `schema.sql` and the ORM models describing the same tables, columns and enum values |
+| `test_transcribe.py` | Fragmented WebM audio decoding through the real `StreamDecoder` path |
 
-Two of these were **verified to fail when their fix is removed**, because a test
-that cannot detect the bug it guards is worse than no test: the normalisation
-parity test (inject a 0.001% divergence) and the stale-vote regression test in
-`test_smoothing.py`.
+Several of these were **verified to fail when their fix is removed**, because a
+test that cannot detect the bug it guards is worse than no test:
+
+* `test_normalization_parity.py` — inject a 0.001% divergence
+* the stale-vote regression test in `test_smoothing.py`
+* `test_history_does_not_issue_a_query_per_meeting` — remove the `selectinload`
+* `test_history_search_returns_each_meeting_once` — change the subquery to a JOIN
+
+### Frontend — lint and render tests
+
+Both of these exist because of a specific failure. The meeting room shipped with
+**eleven** use-before-define errors: `const` bindings read above the line that
+initialises them, which throws `Cannot access 'X' before initialization` and
+takes the whole screen to the error boundary. A hook dependency array is the
+trap — the callback body is deferred and looks fine, but `[a, b]` is evaluated
+during render.
+
+`vite build` cannot catch it. It transforms modules and performs no scope
+analysis, so the bundle built cleanly while the page was broken. And
+`npm run lint` had never worked: `package.json` carried the script and four
+pinned ESLint packages since Phase 0 with **no configuration file**, so it
+exited with "couldn't find a configuration file".
+
+So:
+
+* **`frontend/.eslintrc.cjs`** now exists, with `no-use-before-define` as an
+  error, plus `react-hooks/rules-of-hooks`.
+* **`frontend/src/test/`** mounts all eight routes against jsdom with the
+  browser APIs this app needs stubbed — `getUserMedia`, `MediaStream`,
+  `RTCPeerConnection`, `WebSocket`, `AudioContext`, `srcObject` — and fails if
+  anything throws. `setup.js` additionally fails a test when React logs a render
+  error, so a crash swallowed by an error boundary cannot pass silently.
+
+These tests deliberately do **not** test behaviour that needs a camera or a
+voice. They answer the narrower question no human should have to re-check after
+every edit: *does each page render at all?* The behaviour that matters — a
+caption crossing from one browser to the other — is in the manual checklist
+below.
+
+They have already paid for themselves twice: they found the unguarded
+`canvas.getContext('2d')` in `HandOverlayCanvas` (null in a real browser when
+the GPU context is lost, and the throw destroyed the entire meeting to fail at
+drawing a decorative overlay), and they caught that the lobby's device picker
+had no effect because `MeetingRoom` was still reading query parameters after the
+lobby moved to `sessionStorage`.
 
 ### Manual end-to-end checklist
 
-1. `./scripts/run_backend.sh` — `/health` reports `"model": {"loaded": true}`
-2. `./scripts/run_frontend.sh` — log in as the seeded deaf demo user
-3. Create a meeting; note the code
-4. Second window (incognito) — log in as the hearing demo user, join by code
-5. Both video tiles show; call state reaches `connected`
-6. Sign **A**, **B**, **L** — the skeleton tracks, letters appear on both screens
-7. Turn on speech captions in the hearing window; speak — text appears in the deaf window
-8. Check the transcript panel shows both directions with speaker labels
-9. Leave the meeting; check History lists it
-10. `SELECT * FROM transcripts;` in MySQL shows the persisted rows
+Needs **two browser profiles** — not two tabs. Each needs its own camera
+permission and its own login. Add `?debug=1` to the meeting URL for the
+diagnostic overlay.
+
+1. `./scripts/run_backend.sh` — `/health` reports every model's `loaded` state
+2. `./scripts/run_frontend.sh` — sign in as the seeded deaf demo user
+3. Create a meeting from Home; note the code
+4. Second profile — sign in as the hearing demo user, join by code
+5. Both tiles show; the People panel reports audio and video arriving
+6. Deaf user signs — the word appears on **both** screens, **once**
+7. Hearing user speaks — grey interim text appears on **both** screens within
+   about a second and turns white on pause
+8. Rest hands in frame for 30 seconds — **zero** captions
+9. Open the Transcript panel — exactly one entry per utterance, no entry
+   containing an earlier one's text
+10. Present a window — the screen fills the stage and **both camera tiles stay
+    visible**; stop from the browser's own bar and check the layout returns
+11. Leave; the meeting-ended page offers the transcript; History lists it
+12. `SELECT segment_id, source, content FROM transcripts;` — one row per segment
+
+`PROGRESS.md` has the full Part D script, with the expected result for each step
+and what to report back if one fails.
 
 ---
 

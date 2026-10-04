@@ -71,6 +71,10 @@ backend/    FastAPI app (api/, ws/, ml/, models/, schemas/, core/) + tests
             ml/ holds predictor · normalization · smoothing · sequence
 ml/         dataset scripts, training scripts, saved .keras models
 frontend/   React + Vite client
+            components/ui/      design system (Icon, Avatar, Dialog, Menu, …)
+            components/meeting/ Stage, ControlBar, CaptionRail, SidePanel, …
+            src/test/           jsdom render tests for every route
+            config/recognition.js  every recognition threshold, in one place
 database/   schema.sql, seed.sql
 docs/       api.md, images/ (confusion matrices, diagrams, screenshots)
 scripts/    setup + run scripts (.sh and .bat)
@@ -86,9 +90,28 @@ scripts/    setup + run scripts (.sh and .bat)
 ./scripts/run_backend.sh           # FastAPI on :8000, docs at /docs
 ./scripts/run_frontend.sh          # Vite on :5173
 
-# tests
-source .venv/bin/activate && pytest backend/tests -v
+# tests — run ALL FOUR before claiming the app works
+source .venv/bin/activate && pytest backend/tests -q   # 258 passed, 2 skipped
+cd frontend && npm run lint                            # must be 0 errors
+cd frontend && npm test                                # 13 passed
+cd frontend && npx vite build                           # must succeed
 ```
+
+### `npm run lint` is not optional
+
+The meeting room once shipped with **eleven** use-before-define errors — `const`
+bindings read above the line that initialises them, which throws
+`Cannot access 'X' before initialization` and takes the whole page to the error
+boundary. A hook dependency array is the trap: the callback body is deferred and
+looks fine, but `[a, b]` is evaluated during render.
+
+`vite build` cannot catch this. It transforms modules and does no scope
+analysis, so the bundle builds cleanly while the page is broken. `.eslintrc.cjs`
+sets `no-use-before-define` to **error** for exactly this reason. Do not
+downgrade it.
+
+`npm test` (vitest + jsdom) mounts all eight routes and fails if anything throws
+at render time, including errors swallowed by an error boundary.
 
 ## Build phase status
 
@@ -108,6 +131,14 @@ source .venv/bin/activate && pytest backend/tests -v
 - [x] Phase 5 — real-time inference over WebSocket
 - [x] Phase 6 — meeting room UI, WebRTC, speech-to-text
 - [x] Phase 7 — Interview Mode, polish, documentation
+- [x] Interface rebuild — design system + 8 pages, per the specification
+      recorded in `PROGRESS.md`. Light palette outside a meeting, dark inside;
+      Roboto and Material Symbols; the meeting page's permanent right-hand panel
+      replaced by three 360px slide-in panels that are closed by default.
+- [ ] **Final verification is OUTSTANDING and needs the user.** Everything that
+      needs a camera, a voice or two participants is unverified. `PROGRESS.md`
+      § "Part D — what still needs a human" has the exact steps and expected
+      results. Do not claim the application works end to end until those pass.
 
 Update these boxes as phases complete.
 

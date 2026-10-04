@@ -273,11 +273,250 @@ covers it, and it needs a human at a camera.
 |---|---|
 | A — caption pipeline | **Done**, transport verified live |
 | B — screen sharing | **Done**, signalling verified live; media path needs two browsers |
-| C — interface rebuild (8 pages) | **Not started** |
-| D — final verification | Blocked on C |
+| C — interface rebuild | **Done** — see below |
+| D — final verification | **Automated checks done. The checks that need a camera, a voice and two participants are listed below and are yours to run.** |
 
-Part C is a full visual rebuild — design system, 8 pages, Material Symbols,
-slide-in panels, Settings dialog. The meeting page's permanent right-hand panel
-is already removed and the caption area and control bar are in place; the rest
-is unstyled.
+---
+
+## Part C — interface rebuild: done
+
+### The crash that started this, and why nothing caught it
+
+The reported error was `Cannot access 'applyAndRecord' before initialization`.
+It was not one mistake, it was **eleven**. `const` bindings are hoisted but sit
+in the temporal dead zone until their initialiser runs, and MeetingRoom.jsx read
+eight different bindings above the line that defined them:
+
+| Binding | Used at | Declared at |
+|---|---|---|
+| `applyAndRecord` | 232 | 246 |
+| `addScreenTrack`, `removeScreenSender`, `sendSignal` | 351–353 | 466 |
+| `remotePresenter` | 363, 365, 375 | 466 |
+| `interview` | 373, 375 | 423 |
+| `remoteScreenStream` | 377 | 466 |
+| `toggleCamera` | 393, 401 | 516 |
+
+A hook **dependency array** is what makes this easy to miss. The callback body
+is deferred and reads fine, but `[screenShare, remotePresenter, interview]` is
+evaluated during render, so it throws before anything calls the callback.
+
+Nothing caught it because nothing was looking. `package.json` had carried a
+`lint` script and four pinned ESLint packages since Phase 0 **with no config
+file**, so `npm run lint` exited with "couldn't find a configuration file".
+`vite build` does not help: it transforms modules and performs no scope
+analysis, so the bundle built cleanly while the page was broken.
+
+Two things now cover it:
+
+* `frontend/.eslintrc.cjs`, with `no-use-before-define` as an **error**.
+* `frontend/src/test/` — vitest + jsdom mount all eight routes and fail if
+  anything throws. `setup.js` also fails a test when React logs a render error,
+  so a crash swallowed by an error boundary cannot pass silently.
+
+### What was built
+
+| Page | File | Notes |
+|---|---|---|
+| Login / Register | `pages/Login.jsx` | 400px card, floating labels, two routes one component |
+| Home | `pages/Home.jsx` | New-meeting menu, code-or-link join, 5 recent meetings |
+| Lobby | `pages/Lobby.jsx` | Mirrored preview, live mic level, 3 device pickers, "I will be signing" |
+| Meeting room | `pages/MeetingRoom.jsx` | Stage / caption rail / control bar, 3 slide-in panels, Settings |
+| Meeting ended | `pages/MeetingEnded.jsx` | Rejoin withheld once the meeting is over |
+| History | `pages/History.jsx` | Server-side search over titles **and** caption text |
+| Transcript | `pages/Transcript.jsx` | Chips, participant filter, highlighted search, TXT + PDF |
+| Sign recognition check | `pages/SignDetection.jsx` | The extra page the spec's C8 asks to be listed |
+
+Design system in `components/ui/` (Icon, Avatar, IconButton, Dialog, Menu,
+TextField, Select, ToastHost, States, TopBar, Logo); meeting-specific pieces in
+`components/meeting/` (Stage, MeetingTile, CaptionRail, ControlBar, SidePanel,
+DetailsPanel, PeoplePanel, LiveTranscriptPanel, SettingsDialog).
+
+Ten superseded files were deleted: `CaptionArea`, `MeetingHeaderControls`,
+`ModeSwitch`, `SpeechControls`, `SubtitleBar`, `TranscriptPanel`,
+`TranscriptDownloadButton`, `VideoTile`, `useFocusMonitor`, `useSpeechToText`,
+plus `Dashboard` and `MeetingDetail` which Home and Transcript replace.
+
+### Bugs found and fixed while building it
+
+1. **The lobby's device picker did nothing.** Problem 6 was a raw `deviceId` in
+   the join URL. The lobby was moved to `sessionStorage`, but MeetingRoom was
+   never updated — it still read `searchParams.get('camera')`, which is now
+   always `null`. Every meeting silently used the system default camera and
+   microphone. A test now asserts the chosen ids reach `getUserMedia`.
+
+2. **A lost canvas context destroyed the whole meeting.** `HandOverlayCanvas`
+   used `canvas.getContext('2d')` without a null check. That is null in a real
+   browser when the GPU context is lost — a driver reset, or a backgrounded tab
+   reclaimed under memory pressure. The throw lands in React's commit phase and
+   escalates to the nearest error boundary, so losing a decorative skeleton
+   overlay took down the camera, the captions and the call. Guarded.
+
+3. **`DEMO-01` became unjoinable.** `formatMeetingCode` re-grouped codes into
+   the generator's `ABC-DEF` shape. The seeded demo meeting's code is four
+   characters then two, so regrouping produced `DEM-O01` and joining failed with
+   "meeting not found". Codes are opaque strings compared for equality;
+   reformatting one is never safe.
+
+4. **52 class names silently rendered as nothing.** Removing `ink-*`,
+   `bridge-*` and `signal-*` from `tailwind.config.js` left 52 references across
+   6 files. Tailwind drops classes it cannot resolve, with no error anywhere, so
+   those components would have appeared completely unstyled. All remapped.
+
+5. **The transcript search could be crashed by typing a bracket.** The
+   highlighter built a `RegExp` from the raw query, so `(` threw
+   "Unterminated group" and took the page down. The needle is escaped.
+
+6. **The interview log would have shown only em dashes.** It read
+   `event.duration_ms`; `FocusEventPublic` calls it `duration_away_ms`.
+
+7. **The sign button lied for a moment.** It said "No sign recognition model is
+   loaded" during the fraction of a second before the socket reported. "Not
+   loaded" and "not yet known" are now distinct states.
+
+### Two backend changes the interface needed
+
+`GET /api/meetings/history` previously returned `MeetingPublic`, which carries
+neither participants nor a caption count — both of which the Home cards and
+History rows draw. The alternative was the frontend fetching each meeting
+individually, which is an N+1 moved onto the network.
+
+New `MeetingSummary` adds both. This reverses a caution in `MeetingDetail`'s own
+docstring about history "dragging every participant row along", so the cost is
+handled rather than ignored: `selectinload` for participants and their users,
+and **one grouped COUNT** for the captions. Four queries regardless of how many
+meetings. `test_history_does_not_issue_a_query_per_meeting` fails if the eager
+loading is ever removed.
+
+The endpoint also takes `?q=`, searching titles **and** caption text, because
+"the meeting where we talked about the dataset" is how people actually look for
+a transcript. Caption text is matched with a **subquery, not a JOIN** — a join
+returns one row per matching caption, so a meeting containing the word five
+times would appear five times.
+`test_history_search_returns_each_meeting_once` guards exactly that.
+
+### Automated verification — what I ran, and what it proves
+
+```
+cd frontend && npm run lint      0 errors, 6 warnings
+cd frontend && npm test          13 passed
+cd frontend && npx vite build    built in 2.6s
+pytest backend/tests -q          258 passed, 2 skipped
+```
+
+The 6 remaining lint warnings are 5 × `react-refresh/only-export-components`
+(files that deliberately export a hook beside a component) and 1 pre-existing
+`exhaustive-deps` in `SignDetection.jsx`. None affects correctness.
+
+Live, against the running backend on MySQL:
+
+```
+GET  /health                     all three models loaded, MySQL connected,
+                                 Whisper base ready
+POST /api/auth/login/json        200
+GET  /api/meetings/history       200, 32 meetings, caption_count and
+                                 participants present on every row
+GET  /api/meetings/history?q=…   200, filters correctly
+GET  /api/meetings/DEMO-01       200 — confirms fix 3 above
+```
+
+Model status as actually reported by `/health`:
+
+| Model | Loaded | Classes | val_accuracy |
+|---|---|---|---|
+| ASL letters (`static`) | yes | 28 | 0.9404 |
+| ISL letters (`isl`) | yes | 35 | 0.9919 |
+| ISL words (`dynamic`) | yes | 40 | 0.8571 |
+
+**These are validation figures, not test figures.** The validation split is what
+early stopping and threshold choices were made against, so it is optimistic by
+construction. The honest held-out numbers are the ones already recorded earlier
+in this file: **90.5%** test accuracy for Model A, and **92.04% macro recall**
+for the ISL letters model under pose-disjoint splitting, with 7 unjudgeable
+classes and H and J at 0%. The Settings dialog labels its number "validation
+accuracy" for this reason, and prints "No accuracy recorded" rather than leaving
+a blank where there is no figure.
+
+---
+
+## Part D — what still needs a human
+
+Everything below needs a camera, a voice, or two participants, so none of it can
+be verified from a terminal. **I have not seen any of it work.**
+
+Start both servers, then open **two different browser profiles** (not two tabs —
+each needs its own camera permission and its own login):
+
+```bash
+./scripts/run_backend.sh      # :8000
+./scripts/run_frontend.sh     # :5173
+```
+
+Sign in as a different account in each. Add `?debug=1` to the meeting URL to get
+the diagnostic overlay.
+
+### D1 — the outcome that matters most
+
+| # | Do this | Expect |
+|---|---|---|
+| 1 | Hearing user says a full sentence | Grey interim text appears on **both** screens within ~1s, and turns **white** when they pause |
+| 2 | Deaf user signs a word | The word appears on **both** screens, once |
+| 3 | Open the Transcript panel | Exactly one entry per utterance. No entry contains an earlier entry's text |
+| 4 | Rest hands in frame, 30 seconds | **Zero** captions appear |
+| 5 | Hold one sign for 5 seconds | It appears **once**, not repeatedly |
+| 6 | Mute, speak, unmute, speak | Captions stop, then resume with no further click |
+| 7 | One user presses CC off | The other still receives everything; the transcript stays complete |
+
+If 1 or 2 fails, read the `?debug=1` overlay and tell me which line is wrong —
+mic track state, engine, last caption sent, last caption received. That
+distinguishes "not recognised" from "recognised but not delivered", which have
+completely different causes.
+
+### D2 — screen sharing
+
+| # | Do this | Expect |
+|---|---|---|
+| 1 | Press Present, choose a window | Screen fills the stage; **both camera tiles stay visible** in the right-hand strip |
+| 2 | Watch from the other browser | The same screen appears, letterboxed, never cropped |
+| 3 | Press Stop presenting | Layout returns to normal for both |
+| 4 | Present again, then use the **browser's own** "Stop sharing" bar | Layout returns to normal for both |
+| 5 | Press Present, then cancel the picker | Nothing happens, and **no error appears** |
+| 6 | While A presents, B presses Present | B is asked "Take over presenting?" |
+| 7 | Sign while presenting | Captions keep working, read from the camera and not the screen |
+
+### D3 — every page, at desktop width and below 900px
+
+Login → Register → Home → lobby → meeting → leave → meeting-ended →
+transcript → History → transcript → `/detect`. In the meeting, open each of
+the three right-hand panels (the stage should shrink, only one open at a time),
+open Settings and walk all three tabs, and try `Ctrl/Cmd+D`, `Ctrl/Cmd+E` and
+`C`.
+
+### D4 — interview mode
+
+Host turns it on from the More menu. The other participant should get the
+acknowledgement dialog, an "Interview mode" chip at the top-left of the stage,
+and a blocking overlay if they switch tab. Opening the screen picker must **not**
+be recorded as a violation. Afterwards, the host opens the transcript and
+expands "Interview mode log".
+
+### Known limitations, stated plainly
+
+* **Untrained-model honesty.** All three models load here, but only Model A has
+  a held-out test figure measured under a disjoint split. No claim is made for
+  the others beyond what `/health` reports.
+* **Continuous signing.** A signer who moves from one sign to the next without
+  pausing is still the hard case; measured word error rate was 17.5% on a
+  continuous stream built from held-out clips, and 34.2% with pauses.
+* **Idle false positives.** The ISL letters model fires on empty landmark slots
+  (measured 100% on zero-input frames), because ~31% of its training slots were
+  legitimately empty. `MOTION_LOOKBACK_FRAMES` exists to gate that, and D1
+  check 4 is the test that it works in practice.
+* **Speaker selection.** `setSinkId` is Chromium-only, so the speaker dropdown
+  is hidden in Firefox and Safari rather than shown doing nothing.
+* **Preferences do not follow you to another computer.** Caption size, engine
+  and recognition mode live in `localStorage` per user id, not on the server.
+* **Icons need the network on first load.** Material Symbols comes from Google
+  Fonts, with `display=block` so the control bar never shows the literal
+  ligature names. Offline on a cold cache, the icons are blank; every button
+  still has its tooltip and accessible label.
 
