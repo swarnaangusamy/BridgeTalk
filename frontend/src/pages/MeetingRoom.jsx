@@ -217,6 +217,20 @@ export default function MeetingRoom() {
   // disagreed about what had been said.
   const { captions, applyCaption, clearCaptions } = useCaptionStore();
 
+  // DECLARED BEFORE useSignSocket, deliberately.
+  //
+  // `const` bindings are hoisted but sit in the temporal dead zone until the
+  // line that initialises them runs. Passing this to the hook above its own
+  // declaration threw "Cannot access 'applyAndRecord' before initialization"
+  // and took the whole meeting screen down to the error boundary.
+  const applyAndRecord = useCallback(
+    (event) => {
+      lastReceivedRef.current = `${event.source}/${event.is_final ? 'final' : 'interim'}: ${(event.text ?? '').slice(0, 28)}`;
+      applyCaption(event);
+    },
+    [applyCaption],
+  );
+
   const {
     status: signSocketStatus,
     prediction,
@@ -241,14 +255,6 @@ export default function MeetingRoom() {
       sendCaption(caption);
     },
     [sendCaption],
-  );
-
-  const applyAndRecord = useCallback(
-    (event) => {
-      lastReceivedRef.current = `${event.source}/${event.is_final ? 'final' : 'interim'}: ${(event.text ?? '').slice(0, 28)}`;
-      applyCaption(event);
-    },
-    [applyCaption],
   );
 
   // One hand for ASL fingerspelling, two for ISL fingerspelling and word signs.
@@ -339,122 +345,6 @@ export default function MeetingRoom() {
     meetingCode: code,
     onCaption: emitCaption,
   });
-
-  // --- screen sharing ------------------------------------------------------
-  const screenShare = useScreenShare({
-    addScreenTrack,
-    removeScreenSender,
-    sendSignal,
-  });
-
-  const handlePresent = useCallback(async () => {
-    if (screenShare.isPresenting) {
-      screenShare.stopPresenting();
-      return;
-    }
-
-    // Someone else has the stage. Ask rather than silently taking it.
-    if (remotePresenter) {
-      const takeOver = window.confirm(
-        `${remotePresenter.name} is presenting. Take over presenting?`,
-      );
-      if (!takeOver) return;
-    }
-
-    // Opening the screen picker takes focus away from the page, which the
-    // interview-mode detector would otherwise record as a violation. The
-    // picker is the app's own dialog, so it is suppressed for its duration.
-    interview.suppressBriefly?.(4000);
-    await screenShare.startPresenting();
-  }, [screenShare, remotePresenter, interview]);
-
-  const someoneIsPresenting = screenShare.isPresenting || Boolean(remoteScreenStream);
-
-  // --- keyboard shortcuts --------------------------------------------------
-  // Ctrl/Cmd+D microphone, Ctrl/Cmd+E camera, C captions. Skipped while focus
-  // is in a text field, or typing a meeting code would toggle the mic.
-  useEffect(() => {
-    const handler = (event) => {
-      const tag = event.target?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-
-      const modifier = event.ctrlKey || event.metaKey;
-      if (modifier && event.key.toLowerCase() === 'd') {
-        event.preventDefault();
-        toggleMic();
-      } else if (modifier && event.key.toLowerCase() === 'e') {
-        event.preventDefault();
-        toggleCamera();
-      } else if (!modifier && event.key.toLowerCase() === 'c') {
-        setCaptionsVisible((value) => !value);
-      }
-    };
-
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, [toggleCamera]);
-
-  // --- Interview Mode ------------------------------------------------------
-  // The mode lives on the MEETING RECORD, not in local state, so a participant
-  // who reloads or reconnects arrives already subject to it. Reloading must not
-  // be a way out.
-  const isHost = Boolean(meeting?.host?.id && user?.id && meeting.host.id === user.id);
-  const interviewOn = Boolean(meeting?.is_interview_mode);
-
-  // Each focus change is posted to the backend so the record survives a page
-  // reload — a tab switch the participant then refreshes away should still be
-  // in the host's log.
-  const handleViolation = useCallback(
-    ({ type, durationMs }) => {
-      if (!interviewOn) return;
-      meetingsApi.logFocusEvent(code, type, durationMs).catch(() => {
-        // Best effort. A failed log must never interrupt the meeting itself.
-      });
-    },
-    [code, interviewOn],
-  );
-
-  const interview = useInterviewMode({
-    enabled: interviewOn,
-    isHost,
-    onViolation: handleViolation,
-    maxViolations: MAX_VIOLATIONS,
-  });
-
-  // The host's live view of who has left and how often.
-  const [violationLog, setViolationLog] = useState([]);
-
-  const refreshViolations = useCallback(() => {
-    if (!isHost || !interviewOn) return;
-    meetingsApi
-      .focusEvents(code)
-      .then((summary) => setViolationLog(summary.by_participant ?? []))
-      .catch(() => {
-        /* the host's panel is informational; a failure must not break the call */
-      });
-  }, [code, interviewOn, isHost]);
-
-  // Polled rather than pushed. The violation feed is a host-only side panel,
-  // and adding a third message type to the inference socket to carry it would
-  // couple attention logging to sign recognition — a failure in one would then
-  // take down the other. Five seconds is well inside human reaction time for
-  // something the host acts on by talking to the candidate.
-  useEffect(() => {
-    if (!isHost || !interviewOn) return undefined;
-    refreshViolations();
-    const timer = setInterval(refreshViolations, 5000);
-    return () => clearInterval(timer);
-  }, [isHost, interviewOn, refreshViolations]);
-
-  const toggleInterviewMode = useCallback(async () => {
-    if (!isHost) return;
-    try {
-      const updated = await meetingsApi.setInterviewMode(code, !interviewOn);
-      setMeeting(updated);
-    } catch (cause) {
-      setCameraError(cause.message ?? 'Could not change interview mode');
-    }
-  }, [code, interviewOn, isHost]);
 
   // --- the call ------------------------------------------------------------
   const {
@@ -561,6 +451,121 @@ export default function MeetingRoom() {
     navigate('/', { replace: true });
   }
 
+  // --- Interview Mode ------------------------------------------------------
+  // The mode lives on the MEETING RECORD, not in local state, so a participant
+  // who reloads or reconnects arrives already subject to it. Reloading must not
+  // be a way out.
+  const isHost = Boolean(meeting?.host?.id && user?.id && meeting.host.id === user.id);
+  const interviewOn = Boolean(meeting?.is_interview_mode);
+
+  // Each focus change is posted to the backend so the record survives a page
+  // reload — a tab switch the participant then refreshes away should still be
+  // in the host's log.
+  const handleViolation = useCallback(
+    ({ type, durationMs }) => {
+      if (!interviewOn) return;
+      meetingsApi.logFocusEvent(code, type, durationMs).catch(() => {
+        // Best effort. A failed log must never interrupt the meeting itself.
+      });
+    },
+    [code, interviewOn],
+  );
+
+  const interview = useInterviewMode({
+    enabled: interviewOn,
+    isHost,
+    onViolation: handleViolation,
+    maxViolations: MAX_VIOLATIONS,
+  });
+
+  // The host's live view of who has left and how often.
+  const [violationLog, setViolationLog] = useState([]);
+
+  const refreshViolations = useCallback(() => {
+    if (!isHost || !interviewOn) return;
+    meetingsApi
+      .focusEvents(code)
+      .then((summary) => setViolationLog(summary.by_participant ?? []))
+      .catch(() => {
+        /* the host's panel is informational; a failure must not break the call */
+      });
+  }, [code, interviewOn, isHost]);
+
+  // Polled rather than pushed. The violation feed is a host-only side panel,
+  // and adding a third message type to the inference socket to carry it would
+  // couple attention logging to sign recognition — a failure in one would then
+  // take down the other. Five seconds is well inside human reaction time for
+  // something the host acts on by talking to the candidate.
+  useEffect(() => {
+    if (!isHost || !interviewOn) return undefined;
+    refreshViolations();
+    const timer = setInterval(refreshViolations, 5000);
+    return () => clearInterval(timer);
+  }, [isHost, interviewOn, refreshViolations]);
+
+  const toggleInterviewMode = useCallback(async () => {
+    if (!isHost) return;
+    try {
+      const updated = await meetingsApi.setInterviewMode(code, !interviewOn);
+      setMeeting(updated);
+    } catch (cause) {
+      setCameraError(cause.message ?? 'Could not change interview mode');
+    }
+  }, [code, interviewOn, isHost]);
+
+  // --- screen sharing ------------------------------------------------------
+  const screenShare = useScreenShare({
+    addScreenTrack,
+    removeScreenSender,
+    sendSignal,
+  });
+
+  const handlePresent = useCallback(async () => {
+    if (screenShare.isPresenting) {
+      screenShare.stopPresenting();
+      return;
+    }
+
+    // Someone else has the stage. Ask rather than silently taking it.
+    if (remotePresenter) {
+      const takeOver = window.confirm(
+        `${remotePresenter.name} is presenting. Take over presenting?`,
+      );
+      if (!takeOver) return;
+    }
+
+    // Opening the screen picker takes focus away from the page, which the
+    // interview-mode detector would otherwise record as a violation. The
+    // picker is the app's own dialog, so it is suppressed for its duration.
+    interview.suppressBriefly?.(4000);
+    await screenShare.startPresenting();
+  }, [screenShare, remotePresenter, interview]);
+
+  const someoneIsPresenting = screenShare.isPresenting || Boolean(remoteScreenStream);
+
+  // --- keyboard shortcuts --------------------------------------------------
+  // Ctrl/Cmd+D microphone, Ctrl/Cmd+E camera, C captions. Skipped while focus
+  // is in a text field, or typing a meeting code would toggle the mic.
+  useEffect(() => {
+    const handler = (event) => {
+      const tag = event.target?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+
+      const modifier = event.ctrlKey || event.metaKey;
+      if (modifier && event.key.toLowerCase() === 'd') {
+        event.preventDefault();
+        toggleMic();
+      } else if (modifier && event.key.toLowerCase() === 'e') {
+        event.preventDefault();
+        toggleCamera();
+      } else if (!modifier && event.key.toLowerCase() === 'c') {
+        setCaptionsVisible((value) => !value);
+      }
+    };
+
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [toggleCamera]);
 
   // Start on a mode the server can actually serve. Defaulting to ASL when only
   // the ISL word model is trained would show an empty panel and look broken,
