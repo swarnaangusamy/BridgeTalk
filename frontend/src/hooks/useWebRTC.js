@@ -25,11 +25,52 @@ import { getToken, WS_BASE_URL } from '../services/api';
  * laptops on one Wi-Fi network, connect fine — and that is what the demo uses.
  */
 
+/**
+ * ICE servers, configured from the environment so a TURN server can be added
+ * at deployment without touching this file.
+ *
+ *   VITE_STUN_URLS   comma-separated, e.g. "stun:stun.l.google.com:19302,stun:..."
+ *   VITE_TURN_URLS   comma-separated, e.g. "turn:turn.example.org:3478"
+ *   VITE_TURN_USERNAME / VITE_TURN_CREDENTIAL
+ *
+ * WHY TURN MATTERS AND STUN IS NOT ENOUGH
+ * ---------------------------------------
+ * STUN only tells each peer what its own public address looks like. That is
+ * sufficient when the two peers can reach each other directly, which is the
+ * case for two laptops on one Wi-Fi network — the demo setup. It fails on
+ * symmetric NAT and on many corporate and mobile networks, where the only way
+ * through is to relay the media through a TURN server.
+ *
+ * No TURN server is configured by default because running one costs bandwidth
+ * and this is a locally-demonstrated project. The hooks are here so that
+ * deploying behind a TURN server is a .env change rather than a code change.
+ */
+function parseUrls(value) {
+  return (value ?? '')
+    .split(',')
+    .map((url) => url.trim())
+    .filter(Boolean);
+}
+
+const STUN_URLS = parseUrls(
+  import.meta.env.VITE_STUN_URLS ??
+    'stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302',
+);
+const TURN_URLS = parseUrls(import.meta.env.VITE_TURN_URLS);
+
 const ICE_SERVERS = [
-  // Google's public STUN servers. Several are listed because any one of them
-  // may be unreachable from a given network, and ICE will use whichever
-  // responds.
-  { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
+  // Several STUN servers are listed because any one of them may be
+  // unreachable from a given network, and ICE uses whichever responds.
+  ...(STUN_URLS.length ? [{ urls: STUN_URLS }] : []),
+  ...(TURN_URLS.length
+    ? [
+        {
+          urls: TURN_URLS,
+          username: import.meta.env.VITE_TURN_USERNAME,
+          credential: import.meta.env.VITE_TURN_CREDENTIAL,
+        },
+      ]
+    : []),
 ];
 
 export function useWebRTC({ meetingCode, localStream, enabled = true }) {
