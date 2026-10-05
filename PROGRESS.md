@@ -520,3 +520,36 @@ expands "Interview mode log".
   ligature names. Offline on a cold cache, the icons are blank; every button
   still has its tooltip and accessible label.
 
+
+
+---
+
+## Technical documentation (in progress)
+
+Writing `docs/BridgeTalk_Project_Documentation.md` — one complete end-to-end
+technical document for the MCA review, 21 sections plus a verification
+appendix.
+
+This is a **read-only** exercise over the application code. Facts come from the
+source, the live MySQL schema, the saved model artefacts and commands run now;
+where this file or `README.md` disagrees with the code, the code wins and the
+disagreement is listed in the document's "Known issues" section.
+
+Section progress is tracked inside the document itself. Three findings so far
+that are recorded there rather than fixed:
+
+1. **Selecting "Browser (Web Speech)" in Settings crashes the meeting room.**
+   The Settings dialog stores `speechEngine: 'browser'`, but the provider
+   registry in `frontend/src/services/stt/index.js` is keyed `webspeech`.
+   `resolveProvider('browser')` falls through to
+   `PROVIDERS[preferred].label` on an undefined entry and throws
+   `TypeError: Cannot read properties of undefined (reading 'label')`. It is
+   called in the body of `useSpeechCaptions`, so it throws during render and
+   the meeting goes to the error boundary. The preference is persisted to
+   localStorage, so the crash survives a reload. Confirmed by running the real
+   module under vitest.
+2. `ml/models/isl_dataset_manifest.json` records `source_dataset` and
+   `source_url` for the **ASL** Kaggle dataset while its classes, alphabet and
+   feature count are the ISL ones.
+3. `ml/models/dynamic_manifest.json` records `features_per_frame: 126` while
+   the saved model's input shape is `(30, 132)`.
