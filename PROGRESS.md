@@ -524,32 +524,52 @@ expands "Interview mode log".
 
 ---
 
-## Technical documentation (in progress)
+## Technical documentation — complete
 
-Writing `docs/BridgeTalk_Project_Documentation.md` — one complete end-to-end
-technical document for the MCA review, 21 sections plus a verification
-appendix.
+`docs/BridgeTalk_Project_Documentation.md` — 21 sections plus a verification
+appendix, 5,538 lines, 10 Mermaid diagrams, 174 tables.
 
-This is a **read-only** exercise over the application code. Facts come from the
-source, the live MySQL schema, the saved model artefacts and commands run now;
-where this file or `README.md` disagrees with the code, the code wins and the
-disagreement is listed in the document's "Known issues" section.
+A **read-only** exercise over the application code: `git diff` confirms nothing
+outside `docs/` and this file changed. Facts come from the source, the live MySQL
+schema, the saved model artefacts, and commands run while writing.
 
-Section progress is tracked inside the document itself. Three findings so far
-that are recorded there rather than fixed:
+### Completeness, audited programmatically against the code
 
-1. **Selecting "Browser (Web Speech)" in Settings crashes the meeting room.**
-   The Settings dialog stores `speechEngine: 'browser'`, but the provider
-   registry in `frontend/src/services/stt/index.js` is keyed `webspeech`.
-   `resolveProvider('browser')` falls through to
-   `PROVIDERS[preferred].label` on an undefined entry and throws
-   `TypeError: Cannot read properties of undefined (reading 'label')`. It is
-   called in the body of `useSpeechCaptions`, so it throws during render and
-   the meeting goes to the error boundary. The preference is persisted to
-   localStorage, so the crash survives a reload. Confirmed by running the real
-   module under vitest.
-2. `ml/models/isl_dataset_manifest.json` records `source_dataset` and
-   `source_url` for the **ASL** Kaggle dataset while its classes, alphabet and
-   feature count are the ISL ones.
-3. `ml/models/dynamic_manifest.json` records `features_per_frame: 126` while
-   the saved model's input shape is `(30, 132)`.
+| Item | In code | In document |
+|---|---|---|
+| HTTP route entries | 22 (18 ours + 4 FastAPI) | 22 |
+| WebSocket endpoints | 3 | 3 |
+| Route handler functions | 21 | 21 |
+| Pydantic schemas | 20 ours (+3 generated) | 20 |
+| Database tables | 5 | 5 |
+| Database columns | 34 | 34 |
+| Frontend routes | 10 `<Route>` (9 pages) | 10 |
+| Page components | 8 | 8 |
+| Custom hooks | 12 | 12 |
+| Backend test files | 15 | 15 |
+| Environment variables | all from `.env.example` | all |
+| WebSocket message types | 11 / 13 / 6 per socket | 11 / 13 / 6 |
+
+A script checked every one of these appears by name in the document. It found
+three gaps (the WebSocket handler names) which were then added. Final run: no
+gaps. 43 internal links all resolve.
+
+### Defects found while documenting — recorded, not fixed
+
+| ID | Severity | Issue |
+|---|---|---|
+| **K-1** | **Critical** | **Settings → Captions → "Browser (Web Speech)" crashes the meeting room, and the crash survives a reload.** The dialog stores `speechEngine: 'browser'`, but the registry in `services/stt/index.js` is keyed `webspeech`. `resolveProvider('browser')` reaches its fallback branch and dereferences `PROVIDERS['browser'].label` on `undefined`, throwing `TypeError`. It is called in the body of `useSpeechCaptions`, so it throws during render. The preference persists in `localStorage`. **Confirmed by running the real module under Vitest.** Workaround: keep the engine on "Auto" or "Whisper" |
+| **K-2** | Major | `POST /api/transcripts` accepts `segment_id` and silently discards it, so rows created that way are not protected by `UNIQUE (meeting_id, segment_id)`. No frontend page calls this endpoint. **Confirmed against the live API** |
+| **K-3** | Major | `GET /api/meetings/{code}/focus-events` omits `duration_away_ms` from every event, so the host's interview log shows an em dash for every duration. The `by_participant` aggregates are correct. **Confirmed against the live API and the database** |
+| **K-4** | Minor | Model C has 0.0000 recall on ISL letters `H` and `J` |
+
+Plus discrepancies K-5 to K-10 (notably: the ISL letters dataset's name, source
+and licence are **not recorded anywhere**, and `isl_dataset_manifest.json`
+carries the ASL dataset's details) and operational limits K-11 to K-20.
+
+### Verification side effects
+
+Exercising the live API created rows in the development database, left in place
+rather than deleted: `meetings` id 139 (`4T9-7M2`), `meeting_participants`
+id 157, `focus_events` ids 25–26, `transcripts` id 51. That meeting also has
+Interview Mode switched on.

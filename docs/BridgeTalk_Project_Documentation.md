@@ -2035,15 +2035,17 @@ three `accept()` the connection **first** and then close with code **1008**
 (policy violation) on a bad token — rejecting before accepting surfaces in the
 browser as an opaque 1006 with no reason attached.
 
-| Endpoint | File | Purpose |
-|---|---|---|
-| `/ws/predict/{meeting_code}` | `backend/app/ws/inference.py` | Landmarks in, predictions out; also the caption channel for **both** directions |
-| `/ws/signal/{meeting_code}` | `backend/app/ws/signaling.py` | Relays WebRTC setup messages verbatim |
-| `/ws/transcribe/{meeting_code}` | `backend/app/ws/transcribe.py` | Audio in, Whisper text out |
+| Endpoint | File | Handler function | Purpose |
+|---|---|---|---|
+| `/ws/predict/{meeting_code}` | `backend/app/ws/inference.py` | `predict_socket` | Landmarks in, predictions out; also the caption channel for **both** directions |
+| `/ws/signal/{meeting_code}` | `backend/app/ws/signaling.py` | `signaling_socket` | Relays WebRTC setup messages verbatim |
+| `/ws/transcribe/{meeting_code}` | `backend/app/ws/transcribe.py` | `transcribe_socket` | Audio in, Whisper text out |
 
 ### 7.6.1 `/ws/predict/{meeting_code}` — 11 message types
 
-**Client → server (4)**
+**5 client → server, 6 server → client.**
+
+**Client → server (5)**
 
 | Type | Payload fields | When sent | Handled by |
 |---|---|---|---|
@@ -2071,9 +2073,12 @@ screens agree. Previously the sender was excluded and rendered its own words
 from local state, so the two participants' caption lists came from different
 code paths and disagreed.
 
-### 7.6.2 `/ws/signal/{meeting_code}` — 10 message types
+### 7.6.2 `/ws/signal/{meeting_code}` — 13 message types
 
-**Client → server — the 6 relayed types** (the set `RELAYED_TYPES`)
+**7 client → server, 6 server → client.** Six of the names appear in both
+directions, because a relayed type is re-emitted under the same name.
+
+**Client → server (7) — the 6 relayed types plus `ping`** (the set `RELAYED_TYPES`)
 
 | Type | Payload | When sent |
 |---|---|---|
@@ -2088,7 +2093,7 @@ code paths and disagreed.
 Anything else is answered with an `error` carrying
 `Cannot relay message type '<x>'`.
 
-**Server → client (4 + the relays)**
+**Server → client (6, plus the relays)**
 
 | Type | Payload | When sent | Scope |
 |---|---|---|---|
@@ -2107,7 +2112,9 @@ change needs no backend change at all.
 the call**, because they are the one who knows somebody is waiting. Exactly one
 side offering is what avoids "glare".
 
-### 7.6.3 `/ws/transcribe/{meeting_code}` — 5 message types
+### 7.6.3 `/ws/transcribe/{meeting_code}` — 6 message types
+
+**3 client → server (one of them a binary frame, not JSON), 3 server → client.**
 
 **Client → server (3)**
 
@@ -3441,3 +3448,2090 @@ the decision in one place is the point.
 | 11 | **The ISL letters dataset's provenance is unrecorded** | Its name, source and licence are not written anywhere. Its licence compatibility therefore **cannot be confirmed** |
 | 12 | **Validation accuracy is reported in the UI, not test accuracy** | The Settings dialog shows `val_accuracy` and labels it "validation accuracy". Validation is what early stopping was selected against, so it is optimistic by construction. The numbers to quote are in §10.5.1 |
 
+---
+
+# 11. Speech-to-text
+
+## 11.1 Why there are two engines
+
+Neither engine is good enough alone:
+
+| | Web Speech API | Whisper |
+|---|---|---|
+| Where it runs | The browser (audio goes to Google in Chrome) | **Our own backend** |
+| Browser support | **Chromium only** in practice | Any browser with `MediaRecorder` |
+| Interim text | **Yes** — word by word as you speak | **No** — nothing until you pause |
+| Accuracy | Good | Generally better |
+| Privacy | **Audio leaves the machine to Google** | Audio reaches our server only |
+| Internet | Required | Not required once the model is cached |
+| Cost | Free | CPU time on our server |
+
+So: Web Speech is the better *experience* where it exists, Whisper is the better
+*fallback* and the better *privacy* answer. Both sit behind one interface,
+`frontend/src/services/stt/SttProvider.js`, so `useSpeechCaptions` does not know
+which it is driving.
+
+## 11.2 Engine selection
+
+Defined in `frontend/src/services/stt/index.js`.
+
+**The registry** (`PROVIDERS`) is keyed by **`webspeech`** and **`whisper`**.
+
+**`resolveAuto()`** — what "Auto" does:
+
+1. If `WebSpeechProvider.isSupported()` → use **`webspeech`**, `fellBack: false`.
+2. Else if `WhisperProvider.isSupported()` → use **`whisper`**, `fellBack: true`,
+   with the reason *"This browser has no Web Speech API, so Whisper is being
+   used. Captions appear when you pause rather than word by word."*
+3. Else → `id: null`, reason *"No speech engine works in this browser."*
+
+**`resolveProvider(preferred)`** — honouring an explicit choice:
+
+1. `preferred === 'auto'` → delegate to `resolveAuto()`.
+2. If the requested provider is supported → use it, `fellBack: false`.
+3. Else find any other supported provider → use it, `fellBack: true`, with a
+   reason explaining the substitution.
+4. Else → `id: null`.
+
+**Why "Auto" prefers Web Speech.** The two engines are not interchangeable from
+a user's point of view. Web Speech streams interim text so captions appear while
+you are still talking; Whisper produces nothing until you pause. The code
+comment records the consequence directly: Whisper must **not** be the default in
+Chrome or Edge, because that is what the reported *"spoke and nothing happened"*
+turned out to be — Whisper was selected, it was waiting for an utterance to end,
+and the status line said "listening" the whole time.
+
+**`isSupported()` per provider:**
+
+| Provider | Test |
+|---|---|
+| `WebSpeechProvider` | `Boolean(SpeechRecognitionClass)` — captured at **module load** from `window.SpeechRecognition ?? window.webkitSpeechRecognition` |
+| `WhisperProvider` | `MediaRecorder` exists **and** `navigator.mediaDevices.getUserMedia` exists **and** `pickMimeType() !== null` |
+
+> ### Defect K-1 — the Settings dialog's "Browser" option crashes the meeting
+>
+> The registry keys are `webspeech` and `whisper`. But
+> `frontend/src/components/meeting/SettingsDialog.jsx` offers
+> `{ value: 'browser', label: 'Browser (Web Speech)' }`, and
+> `frontend/src/hooks/useMeetingPreferences.js` accepts
+> `speechEngine: ['auto', 'browser', 'whisper']`.
+>
+> So selecting "Browser (Web Speech)" stores `'browser'`, which reaches
+> `resolveProvider('browser')`. There is no `PROVIDERS['browser']`, so step 2
+> fails, step 3 finds a fallback, and the reason string is built as:
+>
+> ```js
+> preferred === 'webspeech'
+>   ? 'This browser has no Web Speech API, so Whisper is being used instead.'
+>   : `The ${PROVIDERS[preferred].label} provider is unavailable here.`
+> ```
+>
+> `preferred` is `'browser'`, so the **else** branch runs and dereferences
+> `PROVIDERS['browser'].label` on `undefined`:
+>
+> ```
+> TypeError: Cannot read properties of undefined (reading 'label')
+> ```
+>
+> **Confirmed by running the real module** under Vitest with the Web Speech and
+> MediaRecorder globals stubbed before import:
+>
+> | Stored value | `resolveProvider` result |
+> |---|---|
+> | `'auto'` | `{id: 'webspeech', fellBack: false}` ✅ |
+> | `'browser'` | **`THREW TypeError: Cannot read properties of undefined (reading 'label')`** ❌ |
+> | `'webspeech'` | `{id: 'webspeech', fellBack: false}` ✅ |
+> | `'whisper'` | `{id: 'whisper', fellBack: false}` ✅ |
+>
+> **Why it is severe.** `resolveProvider` is called in the **body** of
+> `useSpeechCaptions` (line 48), so it throws during render and the meeting room
+> goes to the `ErrorBoundary`. And because the preference is persisted to
+> `localStorage`, **the crash survives a reload** — the meeting room stays
+> unopenable for that user until browser storage is cleared.
+>
+> **Workaround:** leave the engine on "Auto" (the default) or "Whisper".
+
+## 11.3 Engine 1 — Web Speech API
+
+`frontend/src/services/stt/WebSpeechProvider.js`.
+
+| Setting | Value | Why |
+|---|---|---|
+| `continuous` | `true` | Keeps recognising across sentences instead of stopping after one |
+| `interimResults` | `true` | **This is what produces word-by-word text.** Without it nothing appears until the end of an utterance |
+| `lang` | from preferences, default **`en-IN`** | The Indian English acoustic model recognises local accents markedly better than `en-US` |
+| `maxAlternatives` | default | Only the top alternative is used |
+
+**Restart handling.** `onend` fires routinely — the API terminates sessions on
+its own, which is not an error. The provider restarts whenever the microphone is
+still unmuted, bounded by `config/recognition.js`:
+
+| Constant | Value | Purpose |
+|---|---|---|
+| `MAX_RESTARTS` | 40 | A permanently failing recogniser cannot busy-loop |
+| `RESTART_BASE_MS` | 300 | First retry delay |
+| `RESTART_MAX_MS` | 5000 | Backoff ceiling |
+| `HEALTHY_RUN_MS` | 15000 | After a run this long, the restart budget is **refunded**, so a long meeting cannot exhaust it |
+
+**Errors surfaced rather than swallowed:** `not-allowed` (permission),
+`network`, `audio-capture` (no microphone), `no-speech`. Each is reported to the
+UI rather than silently ending recognition.
+
+**Never two instances at once.** `_teardown()` runs before any new session,
+because a second live `SpeechRecognition` on the same microphone produces
+duplicated and interleaved results.
+
+**Language changes** require cycling recognition: a live `SpeechRecognition`
+ignores changes to `lang`. `setLanguage` tears down and restarts, but only while
+listening, so it does not resurrect a session the user deliberately stopped.
+
+**Known limitations:**
+
+| Limitation | Detail |
+|---|---|
+| Chromium only | Firefox has no implementation; Safari's is partial and unreliable |
+| **Audio goes to Google** | Unavoidable in Chrome. Stated in the UI |
+| Needs the internet | Fails offline |
+| Undocumented rate limits | Heavy use can be throttled with no useful error |
+| Punctuation is inconsistent | No control over it |
+| Revises its own text | Interim results change as more audio arrives. Handled by replace-by-`segment_id`, but it does mean a caption can visibly change mid-sentence |
+
+## 11.4 Engine 2 — Whisper on the backend
+
+Client: `frontend/src/services/stt/WhisperProvider.js`.
+Server: `backend/app/ws/transcribe.py`.
+
+### 11.4.1 How audio gets there
+
+1. `MediaRecorder` records the microphone in whatever container the browser
+   prefers (`pickMimeType()` chooses — typically `audio/webm;codecs=opus`).
+2. Each `timeslice` produces a `Blob`, sent as a **binary WebSocket frame** to
+   `/ws/transcribe/{code}`.
+3. The server decodes it to 16 kHz mono float32 PCM — what Whisper requires.
+
+### 11.4.2 `StreamDecoder` — the bug that made speech produce nothing
+
+**The failure.** `MediaRecorder` produces *fragmented* WebM. Only the **first**
+fragment carries the WebM initialisation segment — the header describing the
+codec and sample rate. Decoding each fragment independently therefore yields
+real audio from fragment 1 and **zero samples** from every fragment after it.
+
+The symptom was that the server received roughly 250 ms of audio and then
+silence forever. The voice-activity detector discarded it as too short, and
+nothing was logged, because "no audio in this chunk" looks identical to "quiet
+chunk".
+
+**The fix.** `StreamDecoder` keeps the **whole stream**, re-decodes it from the
+start each time, and feeds forward only the **newly appeared** samples.
+`reset_after_utterance()` keeps the header while discarding consumed audio.
+
+This is covered by `backend/tests/test_transcribe.py` (27 tests), which feeds
+real fragmented audio through the same path.
+
+### 11.4.3 `UtteranceBuffer` — the voice-activity detector
+
+Energy-based, not a trained VAD. Constants in `backend/app/ws/transcribe.py`:
+
+| Constant | Value | Purpose |
+|---|---|---|
+| `SAMPLE_RATE` | **16,000** Hz | What Whisper requires |
+| `SILENCE_RMS` | **0.015** | Root-mean-square below this is silence. Chosen against real microphone input with echo cancellation on, where the noise floor sits near 0.005 |
+| `SILENCE_DURATION_S` | **0.7** | Quiet this long ends an utterance. Shorter cuts people off at natural pauses; longer makes captions feel laggy |
+| `MIN_UTTERANCE_S` | **0.4** | Shorter than this is almost always a cough, a door, or a word clipped by the silence detector. Transcribing it wastes a model call and usually produces a hallucinated word |
+| `MAX_UTTERANCE_S` | **12.0** | Hard ceiling, so someone talking continuously still produces captions rather than an ever-growing buffer that is never transcribed |
+
+Energy-based is the right trade here and the code says why: it costs no extra
+model and produces a predictable "captions appear when you pause" behaviour,
+whereas a learned VAD's mistakes are much harder to explain to a user.
+
+### 11.4.4 The Whisper model
+
+| Setting | Value | Why |
+|---|---|---|
+| Implementation | **faster-whisper 1.0.3** on **CTranslate2 4.8.1** | Several times faster than `openai-whisper` on CPU |
+| Model size | **`base`** (`WHISPER_MODEL_SIZE`) | ~150 MB. `tiny` is faster and worse; `small` the reverse |
+| Quantisation | **int8** | Halves memory and speeds up CPU inference |
+| Device | **CPU** | The project's hardware constraint |
+| `beam_size` | **1** (greedy decoding) | Measurably faster on CPU, and the accuracy difference is small for short utterances |
+| Language | Passed as a **2-letter code** | `language.split("-")[0].lower()` — Whisper accepts `en`, not `en-IN`. Getting this wrong is listed in the build spec as a specific failure point to check |
+| Cache | `ml/models/whisper/` | Inside the repo, so the download is visible and obviously disposable |
+| Threading | `asyncio.to_thread` | Whisper is CPU-bound and blocking. Calling it directly would stall the event loop and freeze every other socket this worker serves |
+
+### 11.4.5 Prerequisites, and what happens without them
+
+Checked **in order**, each closing the socket with code 1008 and a specific code:
+
+| Check | Error code | Message |
+|---|---|---|
+| Valid JWT | `UNAUTHORIZED` | "Invalid or expired token — please log in again" |
+| Whisper loaded | `MODEL_NOT_LOADED` | "Whisper is not available on this server. Use the Web Speech provider." |
+| **ffmpeg on `PATH`** | `FFMPEG_MISSING` | "ffmpeg is not installed on the server, so browser audio cannot be decoded. Install it with: brew install ffmpeg" |
+
+Measured on this machine: **ffmpeg 9.0.1** present, **Whisper `base` loaded**
+(`/health` reports `whisper_loaded: true`).
+
+### 11.4.6 Known limitations
+
+| Limitation | Detail |
+|---|---|
+| **No interim text** | `provides_interim: false`. Nothing appears until you pause. The UI shows a listening indicator instead of partial text |
+| Latency | A full utterance must end, then be transcribed. `latency_ms` is reported per transcript so this is measurable rather than guessed |
+| **Requires ffmpeg** | A system binary, not a Python package. Not pinned |
+| CPU cost | Scales with the number of simultaneous speakers. One backend process transcribing several meetings at once would contend for CPU |
+| Hallucinations on near-silence | Mitigated by `MIN_UTTERANCE_S` discarding anything under 0.4 s |
+| Energy VAD is crude | A noisy room raises the noise floor above `SILENCE_RMS` and utterances stop being segmented. No adaptive noise floor |
+| Fixed server-side language | `language` starts at `en-IN` and changes only via a `config` control message |
+
+## 11.5 How a transcript reaches the other participant
+
+**Identically for both engines**, which is the point of the single protocol.
+Whichever engine produced the text, `useSpeechCaptions` sends it as a
+`caption` message on `/ws/predict` — the same message a sign caption uses, with
+`source: "speech"`. From there it is broadcast, rendered and persisted by exactly
+the same code as a sign caption.
+
+| Step | Web Speech | Whisper |
+|---|---|---|
+| Interim events | Yes, many per utterance | None |
+| Final event | On `isFinal` | On every `transcript` message |
+| `segment_id` | One per utterance, new after each final | Same |
+| `confidence` | Reported by the API | Reported by Whisper, or null |
+
+## 11.6 Mute behaviour
+
+Producing speech captions is gated on exactly one thing: **is my microphone
+unmuted** (`enabled: Boolean(micOn && meeting)`). Not on a panel toggle, not on
+whether captions are displayed. Muting stops recognition; unmuting resumes it
+with no further click.
+
+This was a reported bug. Recognition used to be gated on a `speechOn` flag that
+defaulted to **off**, so a participant who never found that toggle produced no
+captions at all — while the panel still said "listening", because that reported
+the recogniser object's state rather than whether any audio reached it.
+
+---
+
+# 12. Real-time communication
+
+## 12.1 What WebRTC is
+
+**WebRTC** (Web Real-Time Communication) lets two browsers send audio and video
+**directly to each other**, without the data passing through a server. The
+server's only job is **signalling**: helping the two browsers find each other
+and agree on formats. Once connected, the media path is browser-to-browser.
+
+Three things have to be exchanged before media can flow:
+
+| Thing | What it is |
+|---|---|
+| **SDP offer / answer** | Session Description Protocol — a text description of "here are the codecs and tracks I support". One side offers, the other answers |
+| **ICE candidates** | Interactive Connectivity Establishment — a list of possible network addresses at which this peer might be reachable |
+| **Who starts** | Exactly one side must create the offer, or the negotiation collides |
+
+## 12.2 The signalling channel
+
+`/ws/signal/{meeting_code}`, implemented in `backend/app/ws/signaling.py`.
+
+**The server relays six message types verbatim** and understands none of them:
+
+```
+offer · answer · ice-candidate · hangup · presentation-start · presentation-stop
+```
+
+Anything else is answered with an error. The relay stamps `from: {id, name}` and
+forwards the opaque `payload`.
+
+**The server never parses SDP or ICE.** It has no reason to understand them, and
+not parsing them means a WebRTC specification change needs no backend change at
+all.
+
+**Who initiates.** On connecting, a client receives:
+
+```json
+{"type": "joined", "self": {...}, "peers": [...], "should_initiate": true}
+```
+
+`should_initiate` is `len(existing_peers) > 0` — **whoever arrives second starts
+the call**, because they are the one who knows somebody is waiting. If both
+offered simultaneously the negotiation would collide ("glare") and both would
+have to back off and retry.
+
+**`no-peers`.** If a relay reaches nobody, the sender is told. An offer nobody
+received means the UI should say "waiting for the other participant" rather than
+spinning forever on a call that can never connect.
+
+## 12.3 ICE servers
+
+Configured in `frontend/src/hooks/useWebRTC.js` from the environment:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `VITE_STUN_URLS` | `stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302` | STUN — lets each browser discover its own public address |
+| `VITE_TURN_URLS` | **empty** | TURN — would relay media when a direct path is impossible |
+| `VITE_TURN_USERNAME` | empty | TURN credential |
+| `VITE_TURN_CREDENTIAL` | empty | TURN credential |
+
+Two STUN servers are listed because any one of them may be unreachable.
+
+**STUN is not enough, and this is the project's biggest deployment gap.** STUN
+only tells each peer what its own public address looks like. That is enough when
+a direct path exists — two laptops on one Wi-Fi network, which is the demo case.
+It is **not** enough behind symmetric NAT, common on corporate and mobile
+networks, where the only way through is to **relay all media through a TURN
+server**.
+
+No TURN server is configured, because running one costs real bandwidth. The code
+path is complete, so deploying behind TURN is a `.env` change and no code
+change. **As it stands, calls fail to connect on any network that requires a
+relay.**
+
+## 12.4 Perfect negotiation
+
+`useWebRTC.js` implements the standard **perfect negotiation** pattern, with
+three refs:
+
+| Ref | Role |
+|---|---|
+| `makingOfferRef` | True while we are in the middle of creating an offer |
+| `ignoreOfferRef` | True when we have decided to ignore an incoming offer |
+| `politeRef` | Whether **this** peer is the polite one |
+
+The rule: when both peers offer at once, the **polite** peer rolls back its own
+offer and accepts the other's; the **impolite** peer ignores the incoming offer
+and continues with its own. Without this, a simultaneous renegotiation — which
+screen sharing can easily cause — leaves both sides stuck.
+
+`onnegotiationneeded` fires whenever tracks change, and runs a real offer/answer
+exchange. This is what makes screen sharing work as a genuine renegotiation
+rather than a hack.
+
+## 12.5 Track handling
+
+| Operation | Function | What it does | Why |
+|---|---|---|---|
+| **Initial tracks** | `addTrack` for each local track | Camera and microphone are added when the connection is built | — |
+| **Camera off** | `replaceVideoTrack(null)` | Stops the local track, releases the device, and clears the sender's track | `track.enabled = false` keeps the hardware open and the indicator light on, and merely transmits black frames — the cause of the reported "both tiles black yet the skeleton is drawn" |
+| **Camera on** | `replaceVideoTrack(track)` | Acquires a fresh track and swaps it into the existing sender | `replaceTrack` needs **no renegotiation**, so the remote side sees video resume instantly |
+| **Device change** | `replaceAudioTrack` / `replaceVideoTrack` | New track → local stream → sender | Without the audio version, changing microphone mid-call would change which device feeds **speech recognition** while the other participant kept hearing the old one |
+| **Screen share** | `addScreenTrack` | Adds an **additional** video track | **Not** a replacement: the signer must stay visible while anyone presents. A shared screen with no signer on it is a broken call for a deaf participant |
+| **Stop presenting** | `removeScreenSender` | Removes the screen sender | Triggers renegotiation |
+
+`replaceTrackOfKind` is the shared implementation. Its fallback —
+`senders.find(s => s.track === null)` — matters: after the camera is turned off
+the sender's track is `null`, so without that fallback turning the camera back on
+would find no video sender and silently fail to reach the peer. Locally correct,
+remotely still black.
+
+## 12.6 Screen share routing
+
+A second video track arrives at the receiver with no label saying "this is a
+screen". `useWebRTC` routes it by **stream id** (`screenStreamIdRef`), set from
+the `presentation-start` message, so the receiver knows which incoming track to
+render on the stage and which to render as a camera tile.
+
+Stopping is handled in **three** places, because there are three ways it can
+happen:
+
+| How | Mechanism |
+|---|---|
+| Our "Stop presenting" button | `screenShare.stopPresenting()` |
+| **The browser's own "Stop sharing" bar** | `screenTrack.addEventListener('ended', stop)` — this never touches our UI |
+| The presenter leaving | Connection teardown |
+
+A cancelled picker throws `NotAllowedError` — the same error as a denied
+permission — and is treated as a **cancel**, showing nothing.
+
+## 12.7 Disconnect and reconnect
+
+| Event | What happens |
+|---|---|
+| **Peer closes their tab** | The signalling socket's `finally` block broadcasts `peer-left`. The remaining peer tears down its `RTCPeerConnection` and shows "the other participant left" rather than a frozen last frame |
+| **Signalling socket drops** | `useWebRTC` reconnects. An established media connection **survives** a signalling drop — signalling is only needed for setup and renegotiation |
+| **Inference socket drops** | `useSignSocket` reconnects with exponential backoff (500 ms → 10 s), up to 30 % jitter, 12 attempts. Code **1008** stops retrying, because a bad token cannot be fixed by trying again |
+| **ICE fails** | `connectionState` becomes `failed`. The UI shows the state; there is **no automatic ICE restart** — see issue K-10 |
+| **Rejoin** | `POST .../join` inserts a **new** `meeting_participants` row, so the attendance log stays truthful about the disconnection |
+| **Deliberate leave** | `hangUp()`, then `POST .../leave`, then navigate to `/ended/{code}` |
+
+**Jitter is not decoration.** If several clients drop at once — a Wi-Fi access
+point restarting — un-jittered exponential backoff makes them all retry in
+lockstep and recreate the same stampede that dropped them.
+
+**A dropped video call does not take the captions down.** Captions travel on
+`/ws/predict`, not on the signalling socket, precisely so the two failures are
+independent.
+
+---
+
+# 13. Authentication and security
+
+## 13.1 Password storage
+
+`backend/app/core/security.py`.
+
+| Property | Value |
+|---|---|
+| Algorithm | **bcrypt**, via passlib's `CryptContext(schemes=["bcrypt"], deprecated="auto")` |
+| Stored in | `users.password_hash`, `varchar(255)` |
+| Hash length today | 60 characters. The column is 255 so a future switch to argon2 needs no migration |
+| Plaintext stored | **Never**, anywhere |
+| Maximum password length | **72 bytes**, enforced by `UserRegister` |
+
+**Why bcrypt.** It is **deliberately slow**, and that is the feature. An
+attacker who steals the database must spend real time per guess. A fast hash like
+SHA-256 is exactly what such an attacker wants.
+
+**Why 72 bytes.** bcrypt truncates silently beyond 72 bytes. Rejecting longer
+passwords up front is better than accepting one and ignoring the end of it —
+otherwise two different passwords could unlock the same account.
+
+**`deprecated="auto"`** lets passlib transparently mark old hashes for rehashing
+on next login, so the algorithm can be upgraded without a migration.
+
+**`verify_password` catches malformed hashes** rather than raising, because a
+stored value that is not a valid bcrypt hash — from a bad manual insert — should
+be a failed login, not a 500.
+
+## 13.2 Tokens and sessions
+
+There are **no server-side sessions**. Authentication is a **JWT** (JSON Web
+Token) — a signed, base64-encoded set of claims the client sends with each
+request.
+
+| Property | Value | Where |
+|---|---|---|
+| Algorithm | **HS256** (`JWT_ALGORITHM`) | `.env` |
+| Secret | `JWT_SECRET_KEY` | `.env`, gitignored |
+| Lifetime | **1440 minutes = 24 hours** (`ACCESS_TOKEN_EXPIRE_MINUTES`) | confirmed live: `expires_in: 86400` seconds |
+| Claims | `sub` (the user id as a string), `iat` (issued at), `exp` (expiry) | `security.py::create_access_token` |
+| Library | **python-jose 3.3.0** with the `cryptography` backend | — |
+| Stored in the browser | `localStorage`, key `bridgetalk.token` | `services/api.js` |
+| Sent as | `Authorization: Bearer <token>` | `services/api.js::request` |
+| Refresh tokens | **None.** After 24 hours the user logs in again | — |
+
+**A JWT is signed, not encrypted.** Anyone holding it can read its claims with a
+base64 decoder. The signature only guarantees the claims have not been **altered**.
+`security.py` says so explicitly: *"Never put anything secret in the claims."*
+The claims hold only a user id and two timestamps.
+
+**`decode_access_token` returns `None` for anything invalid** — bad signature,
+expired, malformed, or a token for a user who no longer exists. One failure mode,
+so no caller can accidentally treat "expired" differently from "forged".
+
+**Token storage is a documented trade-off.** `services/api.js` records it: an
+httpOnly cookie resists XSS, which `localStorage` does not; but a cookie needs
+CSRF protection and **cannot be read by the WebSocket URL builder**, which needs
+the raw token as a query parameter. For a locally-hosted academic project the
+simpler path was chosen, and the comment exists so the choice is visible rather
+than accidental.
+
+**On every page load** `AuthContext` calls `GET /api/auth/me`. A token in
+`localStorage` proves only that someone logged in once — it may have expired or
+been signed with a rotated secret. Only the server can say. A 401 clears the
+token; any **other** failure (the backend being down) does **not**, so a
+perfectly good token is not thrown away because the server was restarting.
+
+## 13.3 How each endpoint is protected
+
+**REST.** `backend/app/core/deps.py` defines `get_current_user`, used as a FastAPI
+dependency via the `CurrentUser` annotation. It:
+
+1. extracts the bearer token (`OAuth2PasswordBearer(tokenUrl="/api/auth/login")`),
+2. decodes and verifies it,
+3. loads the user from the database,
+4. raises `401` with `WWW-Authenticate: Bearer` on any failure.
+
+Step 3 matters: a token for a **deleted** user is rejected, because the lookup
+fails rather than the id being trusted.
+
+| Protection level | Endpoints |
+|---|---|
+| **Public** | `POST /api/auth/register`, `POST /api/auth/login`, `POST /api/auth/login/json`, `GET /health` |
+| **Any signed-in user** | `GET /api/auth/me`, `POST /api/meetings`, `GET /api/meetings/history`, `GET /api/meetings/{code}`, `POST .../join`, `POST .../leave`, `POST .../focus-events` |
+| **Host only** (403 otherwise) | `POST .../end`, `PATCH .../interview-mode`, `GET .../focus-events` |
+| **Host or participant** (403 otherwise) | `POST /api/transcripts`, `GET /api/transcripts/{id}`, `GET .../export`, `GET .../export.pdf` |
+
+**WebSockets.** All three authenticate by **JWT in the query string**
+(`?token=<JWT>`), because the browser `WebSocket` constructor cannot set headers.
+All three `accept()` **first** and then close with code **1008** on a bad token —
+rejecting before accepting surfaces in the browser as an opaque 1006 with no
+reason, which is much harder to debug.
+
+## 13.4 Who can see which meetings and transcripts
+
+| Resource | Rule | Enforced by |
+|---|---|---|
+| **A meeting's details** | Any signed-in user who knows the code | `get_meeting` — deliberate, because this is how joining by code works |
+| **Meeting history** | Only meetings you **hosted or attended** | `meeting_history` — a `UNION` of hosted ids and attended ids |
+| **A transcript** | Only the host or someone in `meeting_participants` | `_load_meeting_for_member` → 403 |
+| **Both exports** | Same | same |
+| **The focus-event log** | **Host only** | `get_focus_events` → 403 |
+| **Logging a focus event** | Any participant, **for themselves only** | `log_focus_event` uses `current_user.id`; the body cannot name a user |
+| **A transcript line's author** | Always the authenticated caller | `create_transcript` ignores any `user_id` in the body — trusting it would let anyone put words in another participant's mouth in the permanent record |
+
+**Search does not bypass membership.** `GET /api/meetings/history?q=` applies the
+same hosted-or-attended filter before searching;
+`test_history_search_still_excludes_other_peoples_meetings` guards it.
+
+**The honest gap:** knowing a meeting **code** is enough to read that meeting's
+details and to join it. The codes are 6 characters from a 31-character alphabet —
+about 887 million combinations — generated with `secrets.choice`, not
+`random.choice`, so they are not predictable from previously issued codes. But
+there is **no invite list and no rate limit on join attempts**. See issue K-11.
+
+## 13.5 CORS
+
+`backend/app/main.py`:
+
+```python
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins_list,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+```
+
+| Setting | Value | Note |
+|---|---|---|
+| `allow_origins` | From `CORS_ORIGINS`, default `http://localhost:5173,http://127.0.0.1:5173` | An **explicit list**, never `"*"` |
+| `allow_credentials` | `True` | Required for the browser to send our `Authorization` header |
+| `allow_methods` | `*` | — |
+| `allow_headers` | `*` | — |
+
+`allow_credentials=True` together with `allow_origins=["*"]` is forbidden by the
+CORS specification, which is why the explicit list is not optional here.
+
+`CORS_ORIGINS` is stored as a **comma-separated string**, not a list, because
+pydantic-settings tries to JSON-decode list-typed environment variables, which
+would force the awkward `CORS_ORIGINS=["http://..."]` syntax in `.env`.
+
+**WebSockets are not subject to CORS.** They are protected by the JWT instead.
+
+## 13.6 Input validation
+
+| Layer | What it validates |
+|---|---|
+| **Pydantic schemas** | Every REST body. `name` 1–120, `email` a real address, `password` 8–72, `title` 1–200, `content` 1–5000, `confidence` 0.0–1.0, `q` ≤ 200, every enum constrained to its values. A failure is an automatic **422** naming the offending field |
+| **`validate_caption`** | Every caption over the WebSocket: `segment_id` a non-empty string ≤ 64 characters, `source` exactly `sign` or `speech`, `text` a string, `confidence` a number or null |
+| **Mode validation** | `/ws/predict` rejects any `mode` outside `{static, isl, dynamic}` |
+| **Landmark shape** | `normalize_hand` raises unless the input is exactly 21 × 3. Deliberately strict — silently padding a malformed frame would let corrupt data reach the model |
+| **SQL injection** | Structurally prevented: every query goes through SQLAlchemy with bound parameters. There is no string-concatenated SQL anywhere, including the `ILIKE` search, where the needle is a bound parameter |
+| **Frontend regex escaping** | The transcript search highlighter escapes the needle before building a `RegExp`, so typing `(` cannot throw "Unterminated group" and take the page down |
+| **Preference sanitising** | `useMeetingPreferences.sanitise()` discards any stored value this build does not understand, so a stale `localStorage` entry cannot reach the socket |
+
+**XSS.** React escapes all interpolated text by default, and there is **no
+`dangerouslySetInnerHTML` anywhere** in the codebase. Caption text — which comes
+from a model, and from the other participant — is rendered as text, never as
+HTML.
+
+## 13.7 Secrets handling
+
+| Rule | How it is kept |
+|---|---|
+| No secrets in git | `.env` is gitignored. `.env.example` carries placeholders only |
+| One reader | `backend/app/config.py` is the **only** module that reads the environment. Nothing else touches `os.environ` |
+| Fail loudly | pydantic-settings validates and type-casts at **startup**, so a typo like `CONFIDENCE_THRESHOLD=0.8O` fails when the server boots rather than silently at 2 a.m. |
+| Hash never leaves | `UserPublic` has no `password_hash` field, so it cannot leak by someone forgetting to delete it |
+| Database privileges | `schema.sql` creates a dedicated `bridgetalk` user with only `SELECT, INSERT, UPDATE, DELETE` on that one database — never root. If the API were compromised, the blast radius is this database rather than the whole MySQL server |
+| JWT claims | Only a user id and two timestamps. The file says why: a JWT is readable by anyone holding it |
+
+## 13.8 What privacy protection the design actually gives
+
+**The genuine, defensible claim** — the sign-language direction:
+
+> MediaPipe runs in the browser as WebAssembly. Only 21 × 3 normalised
+> coordinates per hand — a few hundred bytes — are sent to the server. **No
+> video frame ever leaves the user's machine.** The inference socket accepts only
+> a `landmarks` message type; there is no code path that could send a frame.
+
+**The honest qualification** — the speech direction:
+
+> With the **Web Speech** engine, **the microphone audio is sent to Google's
+> servers**. That is Chrome's implementation and cannot be disabled while using
+> that engine. With the **Whisper** engine, audio reaches only this project's own
+> backend. The interface states the trade-off: `services/stt/index.js` labels Web
+> Speech *"Audio is sent to Google"*.
+
+**The call media:** camera video and microphone audio travel **peer-to-peer**
+and never pass through the backend. If TURN were ever configured, relayed media
+would pass through the TURN server.
+
+**What is stored permanently:** recognised **text** only, in `transcripts`. No
+audio and no video is ever written to disk by this application.
+
+**What is logged:** the backend logs at INFO level — model load status, socket
+lifecycle, and exceptions. Caption text is not logged. `focus_events` records
+that someone left the tab, never what they looked at.
+
+**Data retention:** no retention policy and no deletion endpoint exist.
+Transcripts persist until the meeting or the user row is deleted, which cascades.
+There is no UI for either. See issue K-12.
+
+---
+
+# 14. Interview mode
+
+## 14.1 What it is, and what it honestly is not
+
+A host can switch Interview Mode on. Participants are then told, put into
+fullscreen, and **every time they leave the meeting tab it is recorded and shown
+to the host**.
+
+**It is a deterrent, not proctoring.** The code says so in three separate places.
+It cannot detect a second monitor, a phone, a person in the room, or someone
+reading from paper. What it can do is make leaving the tab **visible** and
+**costly**.
+
+## 14.2 What triggers it
+
+| Trigger | Mechanism |
+|---|---|
+| Host switches it on | More menu → "Turn on interview mode" → `PATCH /api/meetings/{code}/interview-mode` |
+| A participant joins a meeting where it is already on | `meeting.is_interview_mode` is true on the record they fetch |
+
+**The mode lives on the meeting record**, not in browser state. A participant who
+reloads arrives already subject to it; reloading is not a way out.
+
+`interview_mode_started_at` is stamped when it is switched on, and the rollup
+ignores events from before it — so a tab switch from when it was allowed is not
+reported as a violation.
+
+## 14.3 What each browser API contributes
+
+`frontend/src/hooks/useInterviewMode.js`.
+
+| API | What it contributes | Availability |
+|---|---|---|
+| **`document.visibilityState` + `visibilitychange`** | Detects **tab switching** — the tab is hidden | All browsers |
+| **`window.blur` / `focus`** | Detects switching to **another application** while the tab stays visible | All browsers |
+| **Fullscreen API** | Makes leaving **cost** the view. Detection alone is passive: the participant gets what they went looking for and the host reads about it afterwards. Covering the meeting means the escape is not free | All browsers, but requires a **user gesture** |
+| **Keyboard Lock API** (`navigator.keyboard.lock`) | Captures **Escape**, so it does not silently exit fullscreen | **Chromium only** |
+
+**Both** focus APIs are watched, because they detect different things:
+tab-switching fires `visibilitychange`; clicking another application fires `blur`.
+
+**The acknowledgement click does double duty.** Browsers refuse
+`requestFullscreen()` unless it follows a user gesture, so enforcement **cannot**
+begin on mount. The participant must click "Acknowledge", and that click is what
+permits fullscreen.
+
+**`suppressBriefly(ms)`** exists for one reason: opening the screen picker takes
+focus away from the page, and the picker is the **application's own dialog**.
+Recording it as a violation would punish a candidate for using a feature the app
+offers. `handlePresent` calls `interview.suppressBriefly(4000)`.
+
+## 14.4 What is detected and stored
+
+**Three event types — and they are genuinely everything the browser will tell
+us:**
+
+| `event_type` | Meaning | `duration_away_ms` |
+|---|---|---|
+| `blur` | The window lost focus (another application) | NULL |
+| `hidden` | The tab was switched away | NULL |
+| `return` | They came back | **Set** — the elapsed time |
+
+The duration is on `return` rows only because that is **the first moment it is
+known**. A 300 ms notification steal and a two-minute absence must be
+distinguishable, or the host's log is not worth reading.
+
+Each event is `POST`ed **immediately**, so a candidate who switches tab and then
+refreshes the page is still in the host's log.
+
+Stored in `focus_events` — see [§9.7](#97-table-focus_events).
+
+## 14.5 What the participant sees
+
+| Stage | What appears |
+|---|---|
+| On joining | `InterviewModeDialog` — a **blocking** dialog naming the host, listing which enforcement capabilities this browser has, with an Acknowledge button |
+| During the meeting | An "Interview mode" chip at the **top-left of the stage** |
+| On leaving the tab | `InterviewModeOverlay` — a full-screen blocking overlay stating the mode is on, that this has been recorded, how many times, and how many more before the host is prompted to remove them |
+| To get back | A "Return to the meeting" button. **The overlay is not dismissible by clicking away** — the only route out is re-entering fullscreen, which needs a user gesture |
+
+`MAX_VIOLATIONS = 3` in `MeetingRoom.jsx` is the count after which the overlay
+says the host has been prompted.
+
+## 14.6 What the host sees
+
+| Where | What |
+|---|---|
+| **During the meeting** | A violation panel, polled every **5 seconds** via `GET /api/meetings/{code}/focus-events` |
+| **Afterwards** | A collapsible **"Interview mode log"** on the transcript page, host-only, listing each event with participant, type, time and duration |
+| Reported honestly | `reducedEnforcement` is surfaced when the participant's browser lacks fullscreen or keyboard lock, so the host knows the enforcement was weaker for that person |
+
+**Polling, not pushing.** Adding a third message type to the inference socket
+would couple attention logging to sign recognition, so a failure in one would
+take down the other. Five seconds is well inside human reaction time for
+something the host acts on by **talking to the candidate**.
+
+> **Defect K-3 affects this feature.** `get_focus_events` omits
+> `duration_away_ms` when building each `FocusEventPublic`, so the host's log
+> shows an **em dash for every duration** even though the database holds the
+> value. The aggregate figures in `by_participant` (`total_away_ms`,
+> `longest_away_ms`) **are** correct, because the rollup reads
+> `row.duration_away_ms` directly.
+
+## 14.7 Exactly what it can and cannot prevent, per browser
+
+| Capability | Chrome / Edge | Firefox | Safari |
+|---|---|---|---|
+| Detect tab switching (`visibilitychange`) | ✅ | ✅ | ✅ |
+| Detect switching application (`blur`) | ✅ | ✅ | ✅ |
+| Record the event server-side | ✅ | ✅ | ✅ |
+| Measure how long they were away | ✅ | ✅ | ✅ |
+| Blocking overlay on return | ✅ | ✅ | ✅ |
+| Fullscreen enforcement | ✅ | ✅ | ✅ |
+| **Capture Escape (Keyboard Lock)** | ✅ | ❌ | ❌ |
+| `reducedEnforcement` reported to the host | ✅ (false) | ✅ (true) | ✅ (true) |
+
+**In Firefox and Safari**, pressing **Escape** exits fullscreen without the app
+being able to prevent it. Leaving is still **detected and logged** — the
+participant simply gets out of fullscreen more easily. The host is told this via
+`reducedEnforcement`.
+
+**What it cannot do in any browser:**
+
+| Cannot detect | Why |
+|---|---|
+| A **second monitor** | The browser has no API for other displays' contents |
+| A **phone or tablet** | Not the browser's device |
+| **Another person in the room** | Would require analysing the camera feed for other faces — not done, and would conflict with the project's privacy stance |
+| **Paper notes** | Invisible to any browser API |
+| **A second computer** | Entirely outside the browser |
+| **Screen recording** | No API exposes it |
+| **A virtual machine or remote desktop** | Looks like a normal browser |
+| Reading something in **another window placed beside** the meeting, without focusing it | `blur` fires only on focus change. A side-by-side window that is never clicked does not fire it |
+
+**The honest summary, which the UI itself states:** Interview Mode makes
+**leaving the meeting tab** visible, measurable and inconvenient. It does not
+and cannot establish that a candidate is not receiving help.
+
+---
+
+# 15. Configuration
+
+## 15.1 How configuration works
+
+**One file, one reader.** All configuration lives in `.env` at the repository
+root. `backend/app/config.py` is the **only** module in the backend that reads
+the environment; nothing else touches `os.environ`. That single rule makes it
+possible to answer "where does this setting come from?" without grepping the
+project.
+
+The frontend reads only variables prefixed **`VITE_`**, which is Vite's
+convention — anything without that prefix is not exposed to browser code at all,
+which is why no secret can accidentally reach the client.
+
+`pydantic-settings` validates and type-casts at **startup**, so a typo like
+`CONFIDENCE_THRESHOLD=0.8O` (letter O instead of zero) fails loudly when the
+server boots rather than silently at 2 a.m. during a demo.
+
+`extra="ignore"` is set because the same `.env` feeds both the backend and Vite,
+so the `VITE_*` keys must not raise a validation error in Python.
+
+**Paths are repo-relative.** `config.py::resolve_path` turns a relative path from
+`.env` into an absolute one based on the repository root, so the backend finds
+the models regardless of which directory uvicorn was launched from.
+
+**Secrets are never printed in this document.** Only names, purposes and
+placeholder values appear below.
+
+## 15.2 Every environment variable
+
+### Database
+
+| Variable | Purpose | Example placeholder | Required | Read by |
+|---|---|---|---|---|
+| `DATABASE_URL` | SQLAlchemy connection string | `mysql+pymysql://bridgetalk:YOUR_PASSWORD@localhost:3306/bridgetalk` — or `sqlite:///./bridgetalk.db` for the zero-setup fallback | **Yes** in practice. Code default is the SQLite fallback | `config.py::database_url` → `database.py` |
+
+### Authentication
+
+| Variable | Purpose | Example placeholder | Required | Read by |
+|---|---|---|---|---|
+| `JWT_SECRET_KEY` | **Secret** used to sign and verify tokens. Generate with `python -c "import secrets; print(secrets.token_urlsafe(48))"` | `change_me_to_a_long_random_string` | **Yes** — the default is insecure | `config.py` → `core/security.py` |
+| `JWT_ALGORITHM` | Signing algorithm | `HS256` | No (default `HS256`) | `core/security.py` |
+| `ACCESS_TOKEN_EXPIRE_MINUTES` | Token lifetime in minutes | `1440` (24 hours) | No (default `1440`) | `core/security.py::create_access_token` |
+
+### Server and CORS
+
+| Variable | Purpose | Example placeholder | Required | Read by |
+|---|---|---|---|---|
+| `BACKEND_HOST` | Interface uvicorn binds to | `0.0.0.0` | No (default `0.0.0.0`) | `scripts/run_backend.sh` |
+| `BACKEND_PORT` | Port uvicorn binds to | `8000` | No (default `8000`) | `scripts/run_backend.sh` |
+| `CORS_ORIGINS` | **Comma-separated** list of origins allowed to call the API. A string, not a list, because pydantic-settings would otherwise require JSON syntax | `http://localhost:5173,http://127.0.0.1:5173` | No (has a default) | `config.py::cors_origins_list` → `main.py` |
+
+### Model paths — all repo-relative
+
+| Variable | Purpose | Example placeholder | Required | Read by |
+|---|---|---|---|---|
+| `STATIC_MODEL_PATH` | Model A weights | `ml/models/static_model.keras` | No | `ml/predictor.py` |
+| `MODEL_METADATA_PATH` | Model A metadata | `ml/models/metadata.json` | No | `ml/predictor.py` |
+| `LABELS_PATH` | Model A class list | `ml/models/labels.json` | No | `ml/predictor.py` |
+| `ISL_MODEL_PATH` | Model C weights | `ml/models/isl_model.keras` | No | `ml/predictor.py` |
+| `ISL_METADATA_PATH` | Model C metadata | `ml/models/isl_metadata.json` | No | `ml/predictor.py` |
+| `ISL_LABELS_PATH` | Model C class list | `ml/models/labels_isl.json` | No | `ml/predictor.py` |
+| `DYNAMIC_MODEL_PATH` | Model B weights | `ml/models/dynamic_model.keras` | No | `ml/predictor.py` |
+| `DYNAMIC_METADATA_PATH` | Model B metadata | `ml/models/dynamic_metadata.json` | No | `ml/predictor.py` |
+| `DYNAMIC_LABELS_PATH` | Model B class list | `ml/models/labels_dynamic.json` | No | `ml/predictor.py` |
+
+A **missing model file is never fatal.** Auth, meetings and transcripts must
+still work while someone is training one; the socket reports `MODEL_NOT_LOADED`.
+
+### Speech-to-text (Whisper)
+
+| Variable | Purpose | Example placeholder | Required | Read by |
+|---|---|---|---|---|
+| `WHISPER_MODEL_SIZE` | Which Whisper model to load. `tiny` is faster and worse, `small` the reverse | `base` | No (default `base`) | `ws/transcribe.py::WhisperTranscriber` |
+| `WHISPER_CACHE_DIR` | Where the weights are cached. Inside the repo so the download is visible and obviously disposable | `ml/models/whisper` | No (default as shown) | `ws/transcribe.py` |
+
+### Real-time smoothing — static and ISL letters
+
+| Variable | Purpose | Example placeholder | Required | Read by |
+|---|---|---|---|---|
+| `CONFIDENCE_THRESHOLD` | Softmax floor below which a prediction is ignored | `0.80` | No | `ml/smoothing.py::SmoothingConfig` |
+| `COOLDOWN_MS` | After emitting a label, suppress the same label this long | `1500` | No | same |
+| `MAJORITY_WINDOW` | Vote window length in frames | `10` | No | same |
+| `MAJORITY_MIN` | Votes needed within that window. **Must not exceed `MAJORITY_WINDOW`** — `__post_init__` raises if it does, because the threshold could never be met | `7` | No | same |
+| `NEUTRAL_RESET_FRAMES` | Frames of `nothing` that close the current word | `8` | No | same |
+| `SEQUENCE_LENGTH` | Rolling buffer length for the LSTM | `30` | No | `ml/sequence.py` |
+
+### Real-time smoothing — dynamic (word) mode
+
+| Variable | Purpose | Example placeholder | Required | Read by |
+|---|---|---|---|---|
+| `DYNAMIC_CONFIDENCE_THRESHOLD` | Lower than the static floor: 40 word classes trained on ~20 clips each produce flatter softmax output | `0.70` | No | `SmoothingConfig.for_dynamic` |
+| `DYNAMIC_COOLDOWN_MS` | Longer: a word sign takes 1–2 s, so 1.5 s could fire twice inside one sign | `2500` | No | same |
+| `DYNAMIC_MAJORITY_WINDOW` | Smaller: consecutive windows overlap by 29/30 frames, so they are nearly the same evidence counted again | `5` | No | same |
+| `DYNAMIC_MAJORITY_MIN` | Votes needed | `3` | No | same |
+| `DYNAMIC_STRIDE` | Classify every Nth frame rather than every frame | `3` | No | `ml/sequence.py` |
+| `DYNAMIC_MIN_DETECTION_RATE` | Minimum fraction of a window containing a hand before it is classified. Matches the threshold used when deciding which training clips were usable | `0.30` | No | `ml/sequence.py` |
+| `DYNAMIC_RESET_FRAMES` | Hand-free frames that clear the **smoother's** debounce | `8` | No | `SmoothingConfig.for_dynamic` |
+| `DYNAMIC_BUFFER_RESET_FRAMES` | Hand-free frames that clear the sequence **buffer**. It was 8, and that was measurably harmful — raising it to 30 cut continuous word error rate from 23.3 % to 17.5 % | `30` | No | `ml/sequence.py` |
+
+### Frontend — only `VITE_`-prefixed variables reach the browser
+
+| Variable | Purpose | Example placeholder | Required | Read by |
+|---|---|---|---|---|
+| `VITE_API_BASE_URL` | Base URL for REST calls | `http://localhost:8000` | No (falls back in `api.js`) | `services/api.js` |
+| `VITE_WS_BASE_URL` | Base URL for WebSockets. **Must be `wss://` behind HTTPS** | `ws://localhost:8000` | No | `services/api.js` |
+| `VITE_STUN_URLS` | Comma-separated STUN servers | `stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302` | No (has a default) | `hooks/useWebRTC.js` |
+| `VITE_TURN_URLS` | Comma-separated TURN servers. **Empty by default** | *(empty)* | No — but calls fail on relay-only networks without it | `hooks/useWebRTC.js` |
+| `VITE_TURN_USERNAME` | TURN credential | *(empty)* | Only if TURN is used | `hooks/useWebRTC.js` |
+| `VITE_TURN_CREDENTIAL` | TURN credential (**a secret**) | *(empty)* | Only if TURN is used | `hooks/useWebRTC.js` |
+
+### Not in `.env` — set outside it
+
+| Variable | Purpose | Where it is set |
+|---|---|---|
+| `HF_HUB_DISABLE_XET` | Must be `1`. Without it the Hugging Face Xet backend stalls the Whisper download at 0 bytes with no error | Documented in `backend/requirements.txt`; exported in the shell before the first Whisper load |
+| `KAGGLE_USERNAME` / `KAGGLE_KEY` | **Your own** Kaggle API credentials, for downloading datasets | `~/.kaggle/kaggle.json` or the shell environment |
+| `TF_CPP_MIN_LOG_LEVEL` | Optional. Quiets TensorFlow's startup banner | The shell |
+
+## 15.3 Non-environment configuration
+
+Two files hold tuning values that are deliberately **not** environment
+variables, because changing them changes behaviour that must stay consistent
+between the two participants:
+
+| File | Holds |
+|---|---|
+| `frontend/src/config/recognition.js` | Every client-side recognition threshold — `SIGN` (10 constants) and `SPEECH` (4 constants). See [§10.6.3](#1063-client-side-the-four-gates-and-segmentation) |
+| `backend/app/ws/transcribe.py` | The audio constants — `SAMPLE_RATE`, `SILENCE_RMS`, `SILENCE_DURATION_S`, `MIN_UTTERANCE_S`, `MAX_UTTERANCE_S`. See [§11.4.3](#1143-utterancebuffer--the-voice-activity-detector) |
+
+---
+
+# 16. Running and deploying
+
+## 16.1 Prerequisites
+
+| Requirement | Version | Why |
+|---|---|---|
+| **Python** | 3.11 | TensorFlow 2.16.2 does not support 3.12 at this pin |
+| **Node.js** | 20+ | Vite 7 requires it |
+| **MySQL** | 8.0+ (9.7.1 verified) | Or use the SQLite fallback |
+| **ffmpeg** | any recent (9.0.1 verified) | Only needed for the Whisper engine |
+| A webcam and microphone | — | For actually using it |
+| **Chrome or Edge** | current | For the Web Speech engine |
+
+## 16.2 First-time setup
+
+```bash
+git clone <repository-url>
+cd BridgeTalk
+
+# 1. Create .env from the template, then edit it
+cp .env.example .env          # Windows: copy .env.example .env
+#    Set DATABASE_URL (your MySQL password) and JWT_SECRET_KEY.
+#    Generate a secret with:
+#      python -c "import secrets; print(secrets.token_urlsafe(48))"
+
+# 2. One-time setup: creates .venv, installs pinned Python and npm
+#    dependencies, downloads hand_landmarker.task (~7 MB), and copies the
+#    MediaPipe WASM runtime into frontend/public/models/wasm/
+./scripts/setup.sh            # Windows: scripts\setup.bat
+
+# 3. Create the database schema (idempotent — safe to run twice)
+mysql -u root -p < database/schema.sql
+
+# 4. Optional: two demo users and the DEMO-01 meeting
+mysql -u root -p bridgetalk < database/seed.sql
+
+# 5. Optional: ffmpeg, only for the Whisper engine
+brew install ffmpeg           # macOS
+# sudo apt install ffmpeg     # Debian/Ubuntu
+```
+
+`scripts/setup.sh` is tolerant: if `hand_landmarker.task` cannot be downloaded
+(offline or a blocked network) it **warns rather than failing**, and the lobby's
+landmarker error then names the missing file.
+
+## 16.3 Running locally
+
+Two terminals:
+
+```bash
+# Terminal 1 — the API on :8000, interactive docs at /docs
+./scripts/run_backend.sh      # Windows: scripts\run_backend.bat
+
+# Terminal 2 — the frontend on :5173
+./scripts/run_frontend.sh     # Windows: scripts\run_frontend.bat
+```
+
+Then open **`http://localhost:5173`**.
+
+What the scripts actually do:
+
+| Script | Command | Guards |
+|---|---|---|
+| `run_backend.sh` | `uvicorn app.main:app --app-dir backend --host $BACKEND_HOST --port $BACKEND_PORT --reload` | Fails with a clear message if `.venv` or `.env` is missing |
+| `run_frontend.sh` | `npm run dev` in `frontend/` | Fails if `node_modules` is missing |
+
+**First check:** open `http://localhost:8000/health`. It reports database
+reachability, all three models' load state, Whisper's state and socket
+occupancy in one response.
+
+**Use `localhost`, not an IP address.** `getUserMedia` requires a *secure
+context*, and browsers treat `http://localhost` as secure but `http://192.168.x.x`
+as insecure — so the camera prompt never appears on an IP address.
+
+## 16.4 Running with Docker
+
+```bash
+# Build and start MySQL 8.4, the backend and the frontend
+docker compose up --build
+
+# Frontend: http://localhost:5173
+# Backend:  http://localhost:8000
+```
+
+Three services in `docker-compose.yml`:
+
+| Service | Image / build | Port | Notes |
+|---|---|---|---|
+| `db` | `mysql:8.4` | 3306 | Named volume `bridgetalk_mysql_data`. A **healthcheck** runs `mysqladmin ping` every 5 s, up to 20 retries with a 30 s start period |
+| `backend` | built from `backend/Dockerfile`, context **the repository root** | 8000 | Context is the root, not `backend/`, because the app imports normalisation shared with the training scripts and reads `ml/models/`. A healthcheck curls `/health` |
+| `frontend` | built from `frontend/Dockerfile` | 5173 | Two stages: `node:20-alpine` builds, `nginx:1.27-alpine` serves. A healthcheck wgets `/` |
+
+`backend` uses `depends_on: db: condition: service_healthy` — it waits for the
+healthcheck, not just for the container to exist. Without it the backend starts
+first, fails to connect, and exits.
+
+The Whisper cache is **mounted read-only** (`./ml/models/whisper`) rather than
+copied, because it is ~141 MB and the image should not carry it. Absent on first
+run, the backend starts anyway and reports `MODEL_NOT_LOADED` for Whisper only.
+
+**Note:** compose pins `mysql:8.4` while the development machine runs **MySQL
+9.7.1**. Both satisfy the schema, but they are not the same server — recorded as
+issue **K-7**.
+
+## 16.5 Obtaining or training the models
+
+**The trained models are committed** (`ml/models/*.keras`), so nothing below is
+needed to run the application. It is needed only to reproduce the training.
+
+```bash
+source .venv/bin/activate
+
+# 1. Datasets — needs your own Kaggle API token and accepting each
+#    dataset's terms on its Kaggle page
+python ml/scripts/download_datasets.py --verify        # check what is on disk
+python ml/scripts/download_datasets.py --dataset all  # download
+
+# 2. Landmark extraction (tens of minutes; this is the slow step)
+python ml/scripts/extract_landmarks_images.py --dataset static   # ASL letters
+python ml/scripts/extract_landmarks_images.py --dataset isl      # ISL letters
+python ml/scripts/extract_landmarks_video.py  --dataset include  # ISL words
+
+# 3. Preprocess: balance, split, augment
+python ml/scripts/preprocess.py --dataset static
+python ml/scripts/preprocess.py --dataset isl --split-by-pose
+python ml/scripts/preprocess_dynamic.py
+
+# 4. Train (CPU; recorded times 62.3 s, 85.1 s and 451.9 s)
+python ml/scripts/train_static.py --dataset static
+python ml/scripts/train_static.py --dataset isl
+python ml/scripts/train_dynamic.py
+
+# 5. Evaluate
+python ml/scripts/evaluate.py --model static
+python ml/scripts/evaluate.py --model isl
+python ml/scripts/evaluate.py --model dynamic
+python ml/scripts/evaluate_continuous.py
+python ml/scripts/measure_gates.py
+python ml/scripts/test_inference_path.py
+```
+
+**The ISL letters dataset cannot be downloaded by script** — its
+`kaggle_slug` is empty and its identity is unrecorded. See
+[§10.2.2](#1022-indian-sign-language-alphabet--trains-model-c) and issue **K-5**.
+
+Live model checks that need a camera and write **no** training data:
+
+```bash
+python ml/scripts/test_realtime.py        # webcam → predictions, live
+python ml/scripts/record_eval_clip.py     # record one evaluation clip
+```
+
+## 16.6 Deployment requirements
+
+| Requirement | Why | Status |
+|---|---|---|
+| **HTTPS** | `getUserMedia`, `getDisplayMedia`, the Clipboard API and the Keyboard Lock API all require a **secure context**. Only `localhost` is exempt. Without HTTPS the camera prompt never appears off localhost | **Not configured.** nginx in `frontend/Dockerfile` serves plain HTTP on port 80 |
+| **`wss://` not `ws://`** | A page served over HTTPS cannot open an insecure WebSocket — the browser blocks it as mixed content. `VITE_WS_BASE_URL` must change to `wss://` | A `.env` change only |
+| **A TURN server** | STUN alone fails on symmetric NAT. See [§12.3](#123-ice-servers) | **Not configured.** The code path is complete; `VITE_TURN_*` are empty |
+| A real `JWT_SECRET_KEY` | The default is a placeholder | A `.env` change |
+| A MySQL user that is not root | `schema.sql` already creates a least-privilege `bridgetalk` user | Done in the schema |
+| `CORS_ORIGINS` set to the real origin | The default lists only localhost | A `.env` change |
+| ffmpeg on the server | Only for the Whisper engine | A package install |
+| **A reverse proxy that upgrades WebSockets** | The three sockets need `Upgrade`/`Connection` headers passed through | Not configured |
+
+**This is not production-ready**, and the two reasons are HTTPS and TURN. Both
+are deployment configuration rather than code changes, which is why the code
+reads them from the environment.
+
+## 16.7 Supported browsers
+
+| Browser | Call | Sign recognition | Web Speech | Whisper | Screen share | Interview Mode | Overall |
+|---|---|---|---|---|---|---|---|
+| **Chrome** (desktop) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ full | **Fully supported** |
+| **Edge** (desktop) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ full | **Fully supported** |
+| **Firefox** (desktop) | ✅ | ✅ | ❌ | ✅ | ✅ | ⚠️ no keyboard lock; no speaker select | Works, with Whisper for speech |
+| **Safari** (desktop) | ✅ | ✅ | ⚠️ partial, unreliable | ✅ | ⚠️ varies by version | ⚠️ no keyboard lock; no speaker select | Works, with Whisper for speech |
+| Mobile browsers | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ❌ | ⚠️ | **Not targeted.** The layout is responsive below 900 px but the feature set was never tested there |
+
+**Chrome or Edge is the recommended configuration**, because only Chromium gives
+word-by-word interim captions, speaker selection, and full Interview Mode
+enforcement.
+
+---
+
+# 17. Testing
+
+## 17.1 The two suites, and what each proves
+
+| Suite | Runner | Count | What it proves |
+|---|---|---|---|
+| **Backend** | pytest 8.3.4 | **258 passed, 2 skipped** | The protocol, the database, the access control and the maths behave as specified |
+| **Frontend** | Vitest 2.1.9 + jsdom | **13 passed** | Every page actually renders, and nothing throws at render time |
+| **Lint** | ESLint 8.57.1 | **0 errors, 6 warnings** | No use-before-define, no rules-of-hooks violations |
+| **Build** | Vite 7.3.6 | succeeds | Every import resolves |
+
+## 17.2 Running them
+
+```bash
+# Backend — in-memory SQLite, so no MySQL needed and no real data touched
+source .venv/bin/activate && pytest backend/tests -q
+
+# Frontend
+cd frontend && npm run lint      # must be 0 errors
+cd frontend && npm test          # vitest run
+cd frontend && npx vite build    # must succeed
+```
+
+## 17.3 Result of running the full suite now
+
+```
+$ pytest backend/tests -q
+258 passed, 2 skipped, 1 warning in 61.18s
+
+$ cd frontend && npm run lint
+✖ 6 problems (0 errors, 6 warnings)
+
+$ cd frontend && npm test
+Test Files  1 passed (1)
+     Tests  13 passed (13)
+```
+
+**The 2 skipped tests** are conditional by design — both skip because the
+optional dependency **is** installed here:
+
+| Test | Reason given |
+|---|---|
+| `test_transcribe.py:222` | *"faster-whisper IS installed here"* |
+| `test_transcribe.py:327` | *"Whisper is installed here, so this failure path cannot run"* |
+
+They cover the **absence** of Whisper, which cannot be exercised on a machine
+where it is present.
+
+**The 6 lint warnings**, none affecting correctness:
+
+| Count | Rule | Note |
+|---|---|---|
+| 5 | `react-refresh/only-export-components` | Files that deliberately export a hook beside a component (`AuthContext`, `ToastHost`, `Avatar`, `MeetingHeaderControls`-style modules) |
+| 1 | `react-hooks/exhaustive-deps` | A pre-existing omission in `SignDetection.jsx:190`, commented at the call site |
+
+## 17.4 Backend tests, file by file
+
+258 tests across 15 files, counted with `pytest --collect-only`.
+
+| File | Tests | What it covers |
+|---|---|---|
+| `test_meetings.py` | **40** | Meeting CRUD, join/leave/end, attendance logging, membership boundaries, host-only enforcement, the history payload shape, history search, and a query-count guard |
+| `test_smoothing.py` | **28** | The full `PredictionSmoother` against a synthetic prediction stream with **injected time** — no webcam and no model needed. Confidence gate, majority vote, cooldown, neutral reset, backspace, mode adoption |
+| `test_transcribe.py` | **27** (2 skipped) | `StreamDecoder` against real fragmented audio, `UtteranceBuffer`'s energy VAD, the ffmpeg decode path, language-code mapping, and the Whisper-absent failure paths |
+| `test_auth.py` | **23** | Registration, login, duplicate emails, expired/forged/deleted-user tokens, password hashing, the 72-byte limit, and the identical-error rule for unknown email versus wrong password |
+| `test_websockets.py` | **21** | Socket authentication, message validation, the `should_initiate` rule, verbatim relay, unknown message types |
+| `test_normalization_parity.py` | **20** | Python versus JavaScript agreement **to 1e-6**, plus the invariants: wrist at origin, furthest landmark at 1.0, translation invariance, scale invariance, degenerate-input handling |
+| `test_include_dataset.py` | **19** | INCLUDE dataset layout discovery, class extraction, the transition class |
+| `test_focus_events.py` | **18** | Interview Mode logging, host-only reads, the `interview_mode_started_at` filter, per-participant rollup |
+| `test_dynamic_mode.py` | **12** | The dynamic inference path: buffering, stride, the `__transition__` class, mode switching |
+| `test_dynamic_augmentation.py` | **12** | Sequence augmentation: rotation, noise, mirroring, and that **masked frames stay masked** |
+| `test_sequence_buffer.py` | **11** | `SequenceBuffer`: window readiness, stride, the detection-rate floor, reset-after-empty |
+| `test_isl_preprocessing.py` | **11** | ISL two-hand feature assembly, handedness slotting, the pose-disjoint split |
+| `test_captions.py` | **9** | The caption protocol: interim replaces, final persists, **one row per `segment_id`**, and that **no row carries accumulated history** |
+| `test_transcripts.py` | **5** | Transcript CRUD, TXT and PDF export, member-only access |
+| `test_schema_parity.py` | **4** | `schema.sql` and the SQLAlchemy models describing the same tables, columns and enum values |
+
+**Fixtures** (`backend/tests/conftest.py`): `db_session` (in-memory SQLite),
+`client` (FastAPI `TestClient`), `registered_user`, `auth_headers`,
+`second_headers`, `meeting`.
+
+## 17.5 Tests verified to fail when their fix is removed
+
+A test that cannot detect the bug it guards is worse than no test. These were
+checked by deliberately reintroducing the fault:
+
+| Test | Fault injected |
+|---|---|
+| `test_normalization_parity.py` | A 0.001 % divergence between the Python and JavaScript normalisation |
+| The stale-vote regression test in `test_smoothing.py` | Reverting the vote-window fix |
+| `test_history_does_not_issue_a_query_per_meeting` | Removing the `selectinload` |
+| `test_history_search_returns_each_meeting_once` | Changing the caption subquery to a JOIN |
+
+## 17.6 Frontend tests
+
+`frontend/src/test/pages.test.jsx` — **13 tests**.
+
+**Why they exist.** The meeting room once shipped with **eleven**
+use-before-define errors: `const` bindings read above the line that initialises
+them, which throws `Cannot access 'X' before initialization` and takes the whole
+screen to the error boundary. `vite build` could not catch it — it transforms
+modules and does no scope analysis — and `npm run lint` had never worked, because
+`package.json` carried the script and four pinned ESLint packages with **no
+configuration file**.
+
+| Group | Tests | What is asserted |
+|---|---|---|
+| "every page renders" | 9 | Each of the nine page routes mounts and renders a known element: Login, Register, Home, History, Transcript, Lobby, MeetingRoom, MeetingEnded, SignDetection |
+| "the meeting room honours the lobby" | 4 | The chosen camera and microphone ids reach `getUserMedia` with `exact`, and `echoCancellation`/`noiseSuppression` are requested; sign recognition is **off** by default; **on** when the lobby asked; captions are visible by default |
+
+**`setup.js` stubs the browser APIs jsdom lacks** — each a real gap, not a
+convenience: `getUserMedia`, `MediaStream`, `MediaStreamTrack`, `MediaRecorder`,
+`RTCPeerConnection`, `WebSocket`, `AudioContext`, `AnalyserNode`,
+`HTMLMediaElement.play`/`pause`/`srcObject`, `matchMedia`, the Clipboard API,
+and the Fullscreen API.
+
+Two safeguards make the suite trustworthy:
+
+| Safeguard | What it prevents |
+|---|---|
+| `afterEach` **fails the test if React logged a render error** into `console.error` | A crash caught by an `ErrorBoundary` passing silently |
+| `beforeEach` **clears the shared mocks** | These `vi.fn()`s are created once at module load, so `mock.calls` would otherwise accumulate across tests and an assertion on `calls[0]` would read a different test's call |
+
+The fake `WebSocket` **opens and delivers a `connected` message** with all three
+models in `predictor.describe()`'s real shape. An earlier version stayed
+`CONNECTING` forever, so every test silently ran against the "models unknown"
+branch.
+
+**What these tests do not do.** They do not test behaviour needing a camera or a
+voice. They answer the narrower question no human should re-check after every
+edit: *does each page render at all?*
+
+## 17.7 What is covered only by manual testing
+
+Nothing automated can verify the following; each needs a camera, a voice, or two
+browsers.
+
+| # | What needs a human | Why |
+|---|---|---|
+| 1 | **A caption crossing from one browser to the other** | Needs two real clients with a real WebRTC connection. The single most important outcome of the whole project |
+| 2 | **Sign recognition accuracy in real use** | The measured figures are on dataset samples. Live accuracy with a real signer, real lighting and a real webcam is **not recorded** |
+| 3 | **Idle false positives in practice** | Measured on synthetic input (zeros, frozen poses, random landmarks). Whether `MOTION_LOOKBACK_FRAMES = 20` is enough for a real resting hand needs 30 seconds at a camera |
+| 4 | **Speech recognition quality** | Needs a voice. Accent handling, punctuation and `en-IN` versus `en-US` are not measured |
+| 5 | **The WebRTC media path** | The tests stub `RTCPeerConnection`; they prove the signalling logic, not that video arrives |
+| 6 | **Screen share media** | Signalling is covered; that the other person sees the screen is not |
+| 7 | **Interview Mode enforcement** | Fullscreen and Keyboard Lock cannot be exercised in jsdom |
+| 8 | **How anything looks** | No visual regression testing. The responsive layout below 900 px is unverified |
+| 9 | **Device switching mid-call** | Needs two real devices |
+| 10 | **Microphone level meter** | Needs real audio |
+| 11 | **Browser compatibility** | Only Chromium-family behaviour is exercised; the Firefox and Safari columns in [§16.7](#167-supported-browsers) are derived from API availability, **not measured** |
+
+`PROGRESS.md` holds a four-part manual script (D1–D4) with the expected result
+for each step.
+
+---
+
+# 18. Development history
+
+Taken from the git log: **52 commits** between **2026-07-27** and **2026-10-05**,
+on branch `client`.
+
+## 18.1 Timeline
+
+| Date | Commits | Milestone |
+|---|---|---|
+| 2026-07-27 | 1 | Initial commit |
+| 2026-08-15 | 3 | **Phase 0** scaffold, setup scripts, documentation skeleton. **Phase 1** FastAPI backend, MySQL schema, JWT authentication. npm advisories patched |
+| 2026-08-16 | 10 | **Phase 2** meetings and transcripts API. Normalisation in both languages with a parity test. **Phases 3–4** preprocessing, Model A trained and evaluated, then retrained on the full balanced dataset (**88.5 % → 90.5 %**). **Phase 5** real-time recognition over WebSocket. **Phase 6** meeting room, WebRTC, speech-to-text. **Phase 7** Interview Mode, error boundary, documentation |
+| 2026-08-18 | 2 | **Model B** dynamic word-sign pipeline complete, model still untrained |
+| 2026-08-22 | 3 | **Model C** ISL alphabet — the two-handed pipeline. Word-level ISL extraction accepts INCLUDE and refuses to overstate its split. A dataset layout inspector |
+| 2026-08-27 | 5 | **The ISL word model becomes the demo:** motion features, bidirectional LSTM, **75× faster inference**. Vocabulary curve measured, 40 words kept. Continuous signing: stop requiring pauses. Model language exposed through `/health` |
+| 2026-08-28 | 2 | Speech-to-text provider abstraction, language selector, the Whisper path. Whisper installed and verified |
+| 2026-08-31 | 2 | Transcript export fixed (returned 401 instead of a file). Transcript download on the history page |
+| **2026-10-04** | **23** | The largest day. A Phase 0 audit; ICE servers from the environment; the meeting detail page with search and PDF export; **the ISL fingerspelling model trained with a pose-disjoint split**; Interview Mode completed (fullscreen, keyboard lock, blocking overlay, host log); the lobby; Dockerfiles and compose; the live inference-path test. Then, after two-participant testing: **the caption protocol unified**, **fragmented audio decoding fixed**, producing separated from displaying, **the gates measured and the parked-hand gate added**, screen sharing, **11 use-before-define errors fixed**, and the **complete interface rebuild** in four commits |
+| 2026-10-05 | 1 | This document |
+
+## 18.2 Significant problems found, and how each was fixed
+
+Taken from commit messages and the comments the fixes left behind. These are the
+ones worth being able to explain.
+
+### 1. Normalisation drift — prevented rather than fixed
+
+The normalisation maths exists **twice**: `backend/app/ml/normalization.py` and
+`frontend/src/utils/landmarkUtils.js`. If the two ever disagree, the result is the
+classic silent failure: **97 % training accuracy, garbage live predictions**, with
+nothing in any log to explain it.
+
+`test_normalization_parity.py` (20 tests) asserts agreement **to 1e-6**, and was
+verified to fail when a 0.001 % divergence is injected. Every `ml/scripts/*` file
+**imports** the backend implementation rather than reimplementing it, because a
+third copy would manufacture exactly the drift the rule exists to prevent.
+
+### 2. Model A's accuracy, 88.5 % → 90.5 %
+
+Retraining on the **full** dataset with **balanced** classes. Commit
+`19fa884`.
+
+### 3. The ISL model that was too good — 100 % / 100 % / 99.75 %
+
+Model C initially scored essentially perfectly, which was **investigated rather
+than reported**. The cause: nearest-neighbour distance between train and test was
+**0.1018** against a within-class spread of **4.0178** — the splits were full of
+near-duplicate frames. 41,609 images contained only **1,159 distinct poses**
+(2.8 %).
+
+**The fix was a `--split-by-pose` option** that clusters near-duplicate poses and
+holds whole clusters out. The honest result is **92.04 % macro recall over the 28
+judgeable classes**, with 7 classes unjudgeable and **`H` and `J` at 0 %**.
+
+This is the most important honesty measure in the project.
+
+### 4. Model B 75× too slow — 1373 ms → 18 ms
+
+`Masking` combined with `LSTM` forces Keras down a per-timestep eager execution
+path. Wrapping inference in a compiled `tf.function` fixed it. Commit `1534b93`.
+
+### 5. Word signs confused by handshape alone
+
+Trained on shape only, Model B's top confusions were all **movement** pairs:
+*bad/good*, *big/small*, *dry/wet*, *they/you*. A wrist pinned to the origin in
+every frame cannot express trajectory — the feature vector is identical for a
+hand held still and a hand sweeping across the body.
+
+**Fix:** `sequence_frame_features` appends each wrist's position, making the
+vector 132 wide, and `center_sequence_positions` makes it translation-invariant
+over the window. Worth about **+5 percentage points**.
+
+### 6. Pausing made recognition worse, not better
+
+Continuous word error rate was **23.3 %** with no pauses but **64.2 %** with
+them. `DYNAMIC_BUFFER_RESET_FRAMES` was 8, so a pause cleared the 30-frame buffer
+and forced a full refill — exactly one sign's length — and the sign right after
+any pause was missed entirely.
+
+**Fix:** raise it to 30, the window length, making it nearly a no-op. Rates
+improved to **17.5 %** and **34.2 %**.
+
+### 7. Speech produced no captions at all — the fragmented-audio bug
+
+The reported symptom: engine set to Whisper, status "listening", user spoke,
+nothing appeared anywhere.
+
+**Root cause, proved by instrumenting the decoder:** `MediaRecorder` produces
+*fragmented* WebM and only the **first** fragment carries the initialisation
+segment. Chunks 2, 3 and onwards decoded to **zero samples**. The server received
+250 ms of audio and then silence forever, and the VAD discarded it as too short.
+Nothing was logged, because "no audio in this chunk" looks identical to "quiet
+chunk".
+
+**Fix:** `StreamDecoder` keeps the whole stream, re-decodes it, and feeds forward
+only new samples. **Also:** the engine default became **Auto**, because Whisper
+was defaulting in Chrome and only emits on a pause.
+
+### 8. Captions read "BBBD location location warm warm fast we we we we"
+
+Three bugs with one root cause. The inference socket broadcast
+`result.sentence` — the **whole accumulated sentence** — as the caption text, and
+a 2.5 s cooldown was the only repeat guard, so a held pose re-committed every
+time it lapsed.
+
+**Fix:** one caption event carrying only **that segment's** text, with a
+producer-generated `segment_id`; receivers **replace** rather than append; and
+`useSignCaptions` commits **once per movement segment**, refusing to repeat until
+the hands return to rest. A timer cannot tell "still signing this" from "signed
+it again"; motion can.
+
+### 9. The transcript stored the same sentence repeatedly
+
+The same accumulated-sentence broadcast, persisted once per emitted word, so a
+three-word utterance stored rows reading "a", "a b", "a b c".
+
+**Fix:** one row per `segment_id`, written on the final event, with a
+**UNIQUE (meeting_id, segment_id)** database constraint so a retry collides
+instead of duplicating.
+
+### 10. Both video tiles black, yet the hand skeleton still drawn
+
+`track.enabled = false` keeps the camera hardware open, keeps the indicator light
+on, and merely transmits black frames. Worse, the detection loop early-returned
+on `!cameraOn` **without clearing `landmarks`**, so the last skeleton stayed in
+React state and kept drawing over the black tile forever.
+
+**Fix:** camera off now **stops** the track and releases the device;
+`replaceTrack` keeps the peer in sync; the overlay is cleared with it.
+
+### 11. The hearing user's resting hands recognised as signs ("M at 71 %")
+
+`signDetectionOn` defaulted to **true** for every participant.
+
+**Fix:** opt-in, defaulting off, gated on the camera being on, and set by the
+lobby's "I will be signing in this meeting" checkbox.
+
+### 12. A hardware identifier in a URL users were told to share
+
+The lobby put `deviceId` in the join URL — a stable hardware identifier, in a
+link users are actively encouraged to paste into a chat, and therefore also in
+browser history and `Referer` headers.
+
+**Fix:** `sessionStorage`, which also survives the reload the URL was for, and
+expires with the tab.
+
+### 13. The gates measured, and the parked-hand gate they exposed
+
+`ml/scripts/measure_gates.py` measured what the models do on **idle** input, and
+found that the ISL letters model passes both gates **100 %** of the time on
+all-zero frames. ~31 % of its training slots were legitimately empty, so it
+learned that an empty slot means something.
+
+**No probability threshold can fix this**, because the model is not uncertain —
+it is confidently wrong. Nor can stability gating, because a parked hand is
+perfectly stable.
+
+**Fix:** `MOTION_LOOKBACK_FRAMES = 20` — a letter must have been *arrived at*,
+not merely held.
+
+### 14. Eleven use-before-define errors crashed the meeting room
+
+The reported error was `Cannot access 'applyAndRecord' before initialization`. It
+was **eleven** separate cases. `const` bindings are hoisted but sit in the
+temporal dead zone until their initialiser runs; a hook **dependency array** is
+the trap, because the callback body is deferred and looks fine while
+`[screenShare, remotePresenter]` is evaluated during render.
+
+**Why nothing caught it:** `package.json` had carried a `lint` script and four
+pinned ESLint packages since Phase 0 **with no configuration file**, so
+`npm run lint` exited with "couldn't find a configuration file". `vite build`
+does no scope analysis, so the bundle built cleanly while the page was broken.
+
+**Fix:** reorder the four blocks into dependency order, add
+`frontend/.eslintrc.cjs` with `no-use-before-define` as an **error**, and add the
+vitest render suite.
+
+### 15. A lost canvas context destroyed the whole meeting
+
+`HandOverlayCanvas` called `canvas.getContext('2d')` and used the result without
+a null check. That is null in a real browser when the GPU context is lost — a
+driver reset, or a backgrounded tab reclaimed under memory pressure. The throw
+lands in React's commit phase and escalates to the nearest error boundary, so
+**losing a decorative skeleton overlay destroyed the camera, the captions and the
+call**.
+
+**Fix:** guard the null and return. Found by the new jsdom render tests.
+
+### 16. The transcript export button returned 401 instead of a file
+
+A plain `<a href>` triggers a browser navigation, and a navigation cannot set
+request headers — so the member-only endpoint saw no token.
+
+**Fix:** an authenticated `fetch` → `Blob` → temporary anchor click, with the
+object URL revoked afterwards.
+
+### 17. The lobby's device picker did nothing
+
+After the lobby moved to `sessionStorage` (fix 12), `MeetingRoom` was never
+updated — it still read `searchParams.get('camera')`, which is now always `null`.
+**Every meeting silently used the system default camera and microphone.**
+
+**Fix:** read the stored preferences, with a test asserting the chosen ids reach
+`getUserMedia`.
+
+### 18. Fifty-two class names silently rendered as nothing
+
+Removing `ink-*`, `bridge-*` and `signal-*` from `tailwind.config.js` during the
+interface rebuild left **52 references across 6 files**. Tailwind drops classes it
+cannot resolve, with no error anywhere, so those components would have appeared
+completely unstyled.
+
+**Fix:** all 52 remapped onto the new tokens, verified by grep.
+
+### 19. The transcript search could be crashed by typing a bracket
+
+The highlighter built a `RegExp` from the raw query, so `(` threw
+"Unterminated group" and took the page down.
+
+**Fix:** escape the needle.
+
+### 20. A corrected claim about the test count
+
+A commit message once claimed "250 tests pass" without the suite having been run;
+the real figure was 246. This was self-corrected in a later commit. It is
+recorded here because the project's documentation standard is that numbers come
+from a run, not from memory.
+
+---
+
+# 19. Known issues, limitations and future work
+
+## 19.1 Defects
+
+Severity: **Critical** = a user can break the application. **Major** = a feature
+produces wrong output. **Minor** = cosmetic or latent.
+
+| ID | Severity | Issue | Evidence | Where |
+|---|---|---|---|---|
+| **K-1** | **Critical** | **Selecting "Browser (Web Speech)" in Settings → Captions crashes the meeting room, and the crash survives a reload.** The dialog stores `speechEngine: 'browser'`, but the provider registry is keyed `webspeech`. `resolveProvider('browser')` falls to its fallback branch and dereferences `PROVIDERS['browser'].label` on `undefined`, throwing `TypeError: Cannot read properties of undefined (reading 'label')`. It is called in the **body** of `useSpeechCaptions`, so it throws during render and the page goes to the `ErrorBoundary`. The preference is persisted to `localStorage`, so reloading does not recover. **Workaround: keep the engine on "Auto" or "Whisper".** | **Confirmed by running the real module** under Vitest with the globals stubbed before import. See [§11.2](#112-engine-selection) | `components/meeting/SettingsDialog.jsx` (`ENGINES`), `hooks/useMeetingPreferences.js` (`VALID.speechEngine`), `services/stt/index.js` (`PROVIDERS`, `resolveProvider`) |
+| **K-2** | Major | **`POST /api/transcripts` silently discards `segment_id`.** The field is accepted by `TranscriptCreate` but `create_transcript` builds its `Transcript(...)` without it. Because MySQL exempts `NULL` from `UNIQUE`, rows created this way are not protected by `UNIQUE (meeting_id, segment_id)` and can be duplicated without limit. **Mitigating fact:** no frontend page calls this endpoint; the application persists captions over the WebSocket, which does set the field | **Confirmed against the live API** — sent `"doc-example-1"`, received `null`. See [§7.4.1](#741-post-apitranscripts) | `backend/app/api/transcripts.py::create_transcript` |
+| **K-3** | Major | **`GET /api/meetings/{code}/focus-events` omits `duration_away_ms` from every event.** The `FocusEventPublic(...)` construction does not pass it, so it defaults to `None`. The host's "Interview mode log" therefore shows an em dash for every duration. The aggregates in `by_participant` **are** correct, because the rollup reads `row.duration_away_ms` directly | **Confirmed against the live API and the database** — row 26 holds `4200`, `total_away_ms` reports `4200`, the event reports `null`. See [§7.3.9](#739-get-apimeetingscodefocus-events) | `backend/app/api/meetings.py::get_focus_events` |
+| **K-4** | Minor | Model C (ISL letters) has **0.0000 recall on `H` and `J`** — 94 and 11 test samples respectively, none correct. Not a code defect but a trained-model defect, and it means two of the 35 letters do not work at all | `ml/models/isl_evaluation_report.json`, `honest_summary.classes_at_zero_recall` | `ml/models/isl_model.keras` |
+
+## 19.2 Discrepancies between code and documents
+
+| ID | Discrepancy | The code / artefact says | Significance |
+|---|---|---|---|
+| **K-5** | **`ml/models/isl_dataset_manifest.json` records the wrong dataset.** `source_dataset` is `"ASL Alphabet (grassknoted/asl-alphabet)"` and `source_url` is the ASL Kaggle link, while `alphabet` is `"Indian Sign Language alphabet"`, `classes` is the 35 ISL classes and `feature_count` is 126. `split.rationale` also still describes "ASL Alphabet frames" | Both, contradicting each other | **The ISL letters dataset's real name, source and licence are not recorded anywhere.** `download_datasets.py::ISL_ALPHABET` has `kaggle_slug=""`, `citation="Record the dataset's own citation here once one is chosen."` and `licence="Varies by dataset"`. **No licence claim can be made for Model C's training data** |
+| **K-6** | **`ml/models/dynamic_manifest.json` records `features_per_frame: 126`**, but the saved model's input shape is `(30, 132)` and `X_dyn_train.npy` is `(8932, 30, 132)` | Manifest 126; model and data 132 | The manifest was written before the 6 wrist-position channels were added and not regenerated. Misleading to anyone reading the manifest to understand the feature layout |
+| **K-7** | `dynamic_metadata.json` records `"task": "WLASL word-level sign classification"` while `source_dataset` is `"INCLUDE (Indian Sign Language, word level)"` and `language` is `"ISL"` | Both | A leftover from when Model B targeted WLASL (ASL). The data **is** INCLUDE; the `task` string is stale |
+| **K-8** | `docker-compose.yml` pins **`mysql:8.4`**; the development machine runs **MySQL 9.7.1** | Both | Both satisfy the schema, but Docker and local development are not running the same server version |
+| **K-9** | `README.md` section 17 states the backend suite count, and `ARCHITECTURE.md` predates the interface rebuild | README was updated to 258; `ARCHITECTURE.md` was not | `ARCHITECTURE.md` describes the pre-rebuild component structure and still refers to components that no longer exist |
+| **K-10** | `PROGRESS.md` describes Part D as outstanding and lists what needs a human | — | Accurate; recorded here so the two documents agree |
+
+## 19.3 Operational limitations
+
+| ID | Limitation | Detail |
+|---|---|---|
+| **K-11** | **No TURN server.** STUN alone fails on symmetric NAT, which is common on corporate and mobile networks. **Calls fail to connect on any network needing a media relay.** The code path is complete; it is a `.env` change plus paying for bandwidth | `hooks/useWebRTC.js`, `.env.example` |
+| **K-12** | **No HTTPS.** `getUserMedia`, `getDisplayMedia`, the Clipboard API and Keyboard Lock all require a secure context. Only `localhost` is exempt, so the camera prompt never appears when served off localhost over HTTP | `frontend/Dockerfile` serves plain HTTP |
+| **K-13** | **Two participants only.** `useWebRTC` holds a single `RTCPeerConnection`. `Stage.jsx` has a three-or-more grid branch but never receives more than one remote stream | — |
+| **K-14** | **Icons need the network on first load.** Material Symbols comes from Google Fonts with `display=block`, so on a cold cache without internet the icons render as **blank space**. Every button keeps its tooltip and `aria-label`, so the interface stays operable, but it looks broken | `frontend/index.html` |
+| **K-15** | **No data retention policy and no deletion endpoint.** Transcripts persist until the meeting or user row is deleted, which cascades — but there is no UI for either | — |
+| **K-16** | **`meeting_participants` accumulates rows.** Every join inserts, by design, so a participant who reconnects appears repeatedly. The live database has a meeting with **17** participant rows for two people | `api/meetings.py::join_meeting` |
+| **K-17** | **No ICE restart.** If ICE fails mid-call, `connectionState` becomes `failed` and the UI shows it, but no automatic recovery is attempted | `hooks/useWebRTC.js` |
+| **K-18** | **No rate limiting anywhere.** Login, registration, meeting creation and join attempts are unlimited. Knowing a 6-character code is enough to join a meeting | — |
+| **K-19** | **No refresh tokens.** After 24 hours the user must log in again, mid-meeting if necessary | `core/security.py` |
+| **K-20** | **Whisper's language is server-side state** starting at `en-IN` and changeable only by a `config` control message. Two participants on one backend process do not have independent language settings on this socket | `ws/transcribe.py` |
+
+## 19.4 Unused and dead code
+
+Found by searching for references across the whole `src` tree and the backend.
+
+| Item | Status | Note |
+|---|---|---|
+| `POST /api/transcripts` | **Not called by any frontend page.** `services/api.js` exports `transcripts.append`, and nothing imports it | The WebSocket path is what the application uses. The endpoint is tested (`test_transcripts.py`) and documented, so it is a working but unused API surface |
+| `transcripts.exportUrl(meetingId)` in `services/api.js` | Unused | Superseded by `transcripts.download`, which does the authenticated fetch |
+| `useSignSocket`'s `clearSentence` / `backspace` | Exported but not used by `MeetingRoom.jsx` | The server-side `clear` and `backspace` message types are therefore reachable only from `/detect`. `useSignCaptions.undoLast` / `clearCurrent` are what the meeting room's pill buttons use |
+| `sentence` from `useSignSocket` | Returned but not consumed by `MeetingRoom.jsx` | The accumulated sentence is a leftover of the pre-`segment_id` design; the caption store replaced it |
+| `MAX_VIOLATIONS` enforcement | The overlay **says** the host has been prompted after 3 violations, but **no removal mechanism exists** | There is no "remove participant" endpoint. The message is a deterrent, not a description of an implemented action |
+| `ARCHITECTURE.md` | Stale | Predates the interface rebuild |
+| `components/RecognitionModeToggle.jsx`, `components/SignDetectionPanel.jsx` | Used **only** by `/detect` | Not dead, but outside the main flow |
+| `@vitest/coverage-v8` | Installed, never invoked | No coverage threshold is configured |
+| `FocusEventType.return` handling in the rollup | `return` rows are counted in `total_events` but excluded from `away_count` | Deliberate and correct — a return is the recovery, not another offence |
+
+## 19.5 Realistic future work
+
+Ordered by value for the effort.
+
+| # | Improvement | Why it matters | Effort |
+|---|---|---|---|
+| 1 | **Fix K-1** — align the engine ids (`'browser'` → `'webspeech'`, or accept both in `resolveProvider`) | A user-reachable crash that survives a reload | Minutes |
+| 2 | **Fix K-2 and K-3** — pass `segment_id` through `create_transcript`, pass `duration_away_ms` through `FocusEventPublic` | Both are one-line omissions producing wrong data | Minutes |
+| 3 | **Record the ISL dataset's identity and licence** (K-5) and regenerate the manifest | Without it the model's provenance cannot be defended, which an examiner may well ask about | Hours, once the dataset is identified |
+| 4 | **Deploy behind HTTPS and a TURN server** | The two things standing between this and a usable deployment | Configuration plus a TURN host |
+| 5 | **Retrain Model C to fix `H` and `J`** | Two of 35 letters simply do not work. Likely needs more distinct poses for those classes | Days, and more data |
+| 6 | **Obtain a signer-disjoint evaluation** | **No model has been shown to generalise to an unseen signer.** This is the biggest caveat on every number in §10.5 | Needs a dataset with signer labels |
+| 7 | **Increase the word vocabulary beyond 40** | The vocabulary curve was measured and 40 chosen; going further needs more INCLUDE classes and a larger model | Days |
+| 8 | **Support three or more participants** | Either a mesh of N−1 connections or an SFU media server | Weeks |
+| 9 | **Add ICE restart** (K-17) | A mid-call network change currently ends the call | Days |
+| 10 | **Self-host the fonts** (K-14) | Removes the last runtime network dependency and makes the UI fully offline | Hours |
+| 11 | **Add rate limiting** (K-18) | Login and join endpoints are unprotected against brute force | Hours |
+| 12 | **A retention and deletion policy** (K-15) | Transcripts of private conversations persist indefinitely with no way to remove them | Days |
+| 13 | **Grammar post-processing** | ISL word order differs from English. A small language model could reorder recognised tokens into readable English | Weeks, and a research question |
+| 14 | **Facial and body landmarks** | Sign languages carry grammar in facial expression and body shift. MediaPipe Holistic provides these; the models would need retraining on richer features | Weeks |
+| 15 | **Visual regression testing** | Nothing verifies how any of it looks, including the responsive layout | Days |
+
+---
+
+# 20. Review preparation
+
+Thirty questions an examiner is likely to ask, each answered from this codebase.
+The hard ones are not softened.
+
+### Q1. In one sentence, what does BridgeTalk do that Google Meet does not?
+
+It translates **sign language into live text** so a hearing participant can
+understand a deaf participant — the reverse direction that existing tools do not
+address. Meet, Zoom and Teams all caption speech well; none of them lets a
+hearing person understand signing.
+
+### Q2. Why did you use landmarks instead of training on images?
+
+Three reasons, and the first is the real one. **Generalisation:** an image model
+learns skin tone, sleeve colour, lighting and background along with handshape; a
+landmark model cannot see any of those because they are not in its input.
+**Size:** Model A is 60,892 parameters and 753 KB, against tens of millions for a
+comparable CNN. **Speed:** median server inference is 0.70 ms.
+
+The cost is a hard dependency on MediaPipe — anything it cannot see, the model
+never sees either.
+
+### Q3. Why is the hand tracking in the browser and not on the server?
+
+Because it means **video never leaves the user's machine**. Only 21 × 3
+coordinates per hand — a few hundred bytes a frame — are sent. That is a privacy
+property and a bandwidth property at once: roughly 5 KB/s instead of 500 KB/s, a
+factor of about 100. It also keeps the server cheap, since it does one small
+matrix multiplication per frame rather than decoding video.
+
+### Q4. Why three models rather than one?
+
+They solve three different problems with three different input shapes.
+
+| | Input | Why separate |
+|---|---|---|
+| ASL letters | 63 numbers, one frame | One-handed |
+| ISL letters | 126 numbers, one frame | **Two-handed** — ASL's weights are not merely less accurate, they are the wrong shape |
+| ISL words | 30 frames × 132 numbers | A **sequence**; meaning is in the movement |
+
+### Q5. Why an MLP for letters and an LSTM for words?
+
+A single frame's 63 numbers have no sequence and no spatial grid, so there is
+nothing for a convolution or a recurrence to exploit — a plain fully-connected
+network is the right shape. A word sign **is** a sequence, so it needs a layer
+that carries state across timesteps. The LSTM is **bidirectional** because the
+clip is already complete when classified, so there is no reason to read it only
+forwards.
+
+### Q6. How accurate is it, really?
+
+| Model | Test top-1 | The honest caveat |
+|---|---|---|
+| ASL letters | **90.53 %** on 6,440 held-out samples | Contiguous split, no signer held out |
+| ISL letters | 98.14 % weighted — **but quote 92.04 %** | That is macro recall over the **28 of 35** classes that have held-out samples. 7 could not be judged; **`H` and `J` score 0** |
+| ISL words | **85.23 %** on 149 clips | 149 clips across 41 classes is fewer than 4 each; one error moves it ~0.7 pp |
+
+And the caveat that applies to all three: **no signer-disjoint evaluation exists**,
+so none of these numbers demonstrates generalisation to a new signer.
+
+### Q7. Why is the ISL letters figure 98 % in one place and 92 % in another?
+
+Because **weighted** top-1 is inflated by class size. A few classes have hundreds
+of test samples and score perfectly; others have a handful. Macro recall treats
+every class equally, which is what you want when asking "does this model work for
+every letter?" The evaluation report carries an explicit `honest_summary` block
+saying exactly this, and naming the 7 unjudgeable classes and the 2 that fail.
+
+### Q8. Why can't you judge seven of the classes?
+
+The pose-disjoint split clusters near-duplicate frames and holds whole clusters
+out. Seven classes — `1 2 3 4 5 8 L` — have **fewer than 3 distinct poses** in the
+source data, so there was nothing distinct to hold out. Their accuracy is
+genuinely **unknown**, and reporting a number for them would be fabrication.
+
+### Q9. Your ISL model once scored 100 %. What happened?
+
+It scored 100 % / 100 % / 99.75 %, which was investigated rather than reported.
+Nearest-neighbour distance between train and test was **0.1018** against a
+within-class spread of **4.0178**: the splits were full of near-duplicate video
+frames. 41,609 images contained only **1,159 distinct poses** — 2.8 %. A random
+split was testing the model on images it had effectively already seen.
+
+A `--split-by-pose` option was added, and the honest figure is 92.04 % macro
+recall. **This is the single most important thing I would want you to know about
+how the ML work was done.**
+
+### Q10. What happens when recognition is wrong?
+
+Several things, deliberately layered:
+
+1. **Four client-side gates** reject it first: confidence ≥ 0.70, margin over the
+   runner-up ≥ 0.15, real movement within the last 20 frames, and the hands must
+   have returned to rest since the last commit.
+2. If it is committed anyway, the signer sees it in a **pill on their own tile**
+   with **undo** and **clear** buttons — and can correct it before the final
+   event is sent.
+3. Once the final event is broadcast, the text is on the other person's screen
+   and in the transcript, and **nothing in the interface can take it back**. That
+   is a real limitation.
+4. Interim captions are shown in **grey** and only turn white when final, so a
+   reader knows text may still change.
+
+### Q11. Why did captions once read "warm warm fast we we we we"?
+
+The socket broadcast `result.sentence` — the **whole accumulated sentence** — as
+the caption text, and receivers appended rather than replaced. A 2.5 s cooldown
+was the only repeat guard, so a held pose re-committed every time it lapsed.
+
+A timer cannot distinguish "still signing this" from "signed it again". Motion
+can. The fix was a `segment_id` protocol where interim events carry only that
+segment's text and receivers replace by id, plus committing **once per movement
+segment** and refusing to repeat until the hands return to rest.
+
+### Q12. What is the false-positive rate on idle hands?
+
+Measured, in `ml/models/gate_measurement.json`, 400 trials each, with the live
+gates applied:
+
+| Model | Idle input | False-positive rate |
+|---|---|---|
+| ISL words | all-zero frames | **0 %** |
+| ISL words | a frozen pose | **56.75 %** |
+| ISL words | random landmarks | 52.25 % |
+| ISL letters | all-zero frames | **100 %** |
+| ISL letters | random landmarks | 81.75 % |
+
+**The letter model fires on empty input every single time.** About 31 % of its
+training slots were legitimately empty, so it learned that an empty slot is a
+meaningful pattern. No confidence threshold can fix that, because the model is not
+uncertain — it is confidently wrong. Stability gating cannot either, because a
+parked hand is perfectly stable. Only **movement** separates them, which is why
+`MOTION_LOOKBACK_FRAMES = 20` exists.
+
+### Q13. Why this dataset and not another?
+
+| Dataset | Why | The honest problem |
+|---|---|---|
+| ASL Alphabet | Large, well known, one folder per class, GPL 2 for research use | ASL, not ISL, and consecutive video frames |
+| **INCLUDE** | It is **Indian** Sign Language at word level, which is what the demo needs, with a proper ACM MM 2020 citation | Records no signer identity, so no signer-disjoint split is possible |
+| ISL alphabet | Two-handed ISL fingerspelling, which no ASL dataset can provide | **Its identity was never recorded** — see Q14 |
+
+### Q14. Where exactly did the ISL alphabet dataset come from?
+
+**I cannot fully answer that, and that is a real gap.**
+`ml/scripts/download_datasets.py` deliberately left `kaggle_slug` empty with a
+comment explaining that several ISL alphabet datasets exist with different class
+sets and very different quality, and that naming one it had not verified would be
+an invented path. The dataset was then chosen and downloaded by hand and **its
+name, URL and licence were never written back**. Worse,
+`isl_dataset_manifest.json` inherited the **ASL** dataset's `source_dataset` and
+`source_url` from the shared template.
+
+What *is* recorded: 35 class folders on disk, 41,609 extracted samples, and
+`self_recorded_data: false`. What is **not**: the name, the link, and the licence.
+This is issue K-5, and until it is resolved **no licence claim can be made for
+Model C's training data.**
+
+### Q15. Did you record any training data yourself?
+
+**No.** All three manifests record `self_recorded_data: false`. Two scripts use
+the webcam — `test_realtime.py` and `record_eval_clip.py` — and both only
+**evaluate** an already-trained model. Neither writes a training sample.
+
+### Q16. Why is there no signer-disjoint evaluation?
+
+Because none of the three datasets, as processed, records signer identity.
+`dynamic_manifest.json` is explicit: `split_strategy_requested: "signer"`,
+`split_strategy: "random"`, `signer_disjoint: false`,
+`signers_recorded_by_dataset: false`, and `signers_per_split: [-1]` as a
+"unknown" sentinel.
+
+A signer split is the only way to know a model generalises to a **new person**.
+Without it, every accuracy figure here may be optimistic about an unseen signer.
+The project records this in the artefact rather than quietly using a random split
+and hoping nobody asks.
+
+### Q17. Why is the transcript one row per utterance rather than per word?
+
+Because it once was per word, and each row contained **everything said so far** —
+so a three-word utterance stored rows reading "a", "a b", "a b c". The fix was a
+producer-generated `segment_id`, stable across every interim and the final, with
+the row written only on the final event and a **UNIQUE (meeting_id, segment_id)**
+database constraint. A client retry or a reconnect replaying its tail now
+**collides** instead of duplicating. Idempotent by database constraint, not by
+hope.
+
+### Q18. Why does the server broadcast a caption back to the person who sent it?
+
+Because otherwise each participant assembles their caption list from a different
+code path — local state for their own words, the socket for the other person's —
+and the two disagree. Broadcasting to everyone including the sender means there is
+**one source of truth** and both screens render from it identically.
+
+### Q19. How does speech-to-text work, and why two engines?
+
+Two, behind one interface, because neither is sufficient. **Web Speech** runs in
+the browser and streams interim text word by word, but is Chromium-only and
+**sends audio to Google**. **Whisper** runs on our backend and works in any
+browser, but produces nothing until you pause.
+
+"Auto" prefers Web Speech where it exists. That ordering is deliberate: Whisper
+defaulting in Chrome is what the reported *"spoke and nothing happened"* actually
+was — Whisper was selected, waiting for an utterance to end, with the status line
+saying "listening" the whole time.
+
+### Q20. Your project claims video never leaves the machine. Doesn't speech recognition contradict that?
+
+**Yes, partly, and the interface says so.** The claim is true and defensible for
+the **sign** direction: MediaPipe runs in the browser and only coordinates are
+sent. For the **speech** direction with the Web Speech engine, **the microphone
+audio does go to Google** — that is Chrome's implementation and cannot be
+disabled while using it. `services/stt/index.js` labels that engine *"Audio is
+sent to Google"*, and Whisper is offered as the alternative that keeps audio on
+this project's own backend. Overstating it would be worse than the limitation.
+
+### Q21. Why is the video call peer-to-peer rather than through your server?
+
+Lower latency, and no bandwidth cost. The backend relays only setup messages —
+SDP and ICE — and **never parses them**, which also means a WebRTC specification
+change needs no backend change.
+
+The cost is that peer-to-peer does not always work: behind symmetric NAT a relay
+is required, and **no TURN server is configured**, so calls fail on such networks.
+The code path is complete; it is a `.env` change plus paying for bandwidth.
+
+### Q22. How do you prevent both browsers offering a connection at once?
+
+Two mechanisms. The signalling server tells each client `should_initiate`, which
+is `len(existing_peers) > 0` — **whoever arrives second starts the call**, because
+they are the one who knows somebody is waiting. And for renegotiation, which
+screen sharing causes, `useWebRTC` implements **perfect negotiation**: the polite
+peer rolls back its own offer and accepts the other's; the impolite peer ignores
+the incoming one.
+
+### Q23. How are passwords stored?
+
+**bcrypt**, via passlib, in `users.password_hash`. bcrypt is deliberately slow —
+that is the feature, because an attacker with a stolen database must spend real
+time per guess. Passwords are capped at **72 bytes** because bcrypt truncates
+silently beyond that, and accepting a longer one would mean two different
+passwords unlocking the same account. No plaintext is stored anywhere, and
+`UserPublic` has no `password_hash` field, so the hash cannot leak through a
+forgotten deletion.
+
+### Q24. Why is the token in localStorage rather than an httpOnly cookie?
+
+A documented trade-off, and the comment in `services/api.js` records it. An
+httpOnly cookie resists XSS, which `localStorage` does not. But a cookie needs
+CSRF protection and — decisively — **cannot be read by the WebSocket URL
+builder**, which needs the raw token as a query parameter because the browser
+`WebSocket` constructor cannot set headers. For a locally-hosted academic project
+the simpler path was chosen deliberately rather than by accident.
+
+### Q25. What exactly can Interview Mode prevent?
+
+**It makes leaving the meeting tab visible, measurable and inconvenient. That is
+all, and the UI says so.**
+
+It detects tab switching (`visibilitychange`) and switching application (`blur`),
+records each event server-side with a duration, enforces fullscreen, and in
+Chromium captures Escape via the Keyboard Lock API.
+
+It **cannot** detect a second monitor, a phone, another person in the room, paper
+notes, a second computer, screen recording, or a window placed beside the meeting
+that is never clicked. In Firefox and Safari there is no keyboard lock, so Escape
+exits fullscreen — leaving is still logged, and the host is told enforcement was
+reduced for that participant.
+
+### Q26. How does the system know when a sign has finished?
+
+Three different ways, by mode:
+
+| Mode | Rule |
+|---|---|
+| **Words** | A **movement segment**: hands leave rest (motion > 0.030), move, then return to rest for 4 consecutive still frames. Committed once per segment, never per sliding window |
+| **Letters** | The same label held for 6 consecutive frames, since fingerspelling has no movement to segment on |
+| **Utterance end** | Hands absent or at rest for **1500 ms** closes the caption segment and sends the final event |
+
+### Q27. Where do all the thresholds live, and how were they chosen?
+
+**One file:** `frontend/src/config/recognition.js` for the client,
+`.env` for the server. They were previously scattered between a Python smoother, a
+sequence buffer and two React components, which is how they ended up disagreeing.
+
+They were **measured, not guessed**. `ml/scripts/measure_gates.py` produced
+`gate_measurement.json`, which is what justified `MIN_CONFIDENCE = 0.70`,
+`MIN_MARGIN = 0.15` and — specifically — `MOTION_LOOKBACK_FRAMES = 20`, because
+that measurement showed no probability threshold could reject a resting hand.
+
+### Q28. What are the biggest weaknesses of this project?
+
+In order, and without softening:
+
+1. **No model has been shown to work on an unseen signer.** No dataset has signer
+   labels, so this cannot currently be measured.
+2. **Two ISL letters, `H` and `J`, do not work at all** — 0 % recall.
+3. **A user-reachable crash:** selecting "Browser" in Settings → Captions throws
+   during render and survives a reload (K-1).
+4. **The vocabulary is 40 words**, so it is not a translator.
+5. **No grammar.** Output is tokens joined together; ISL word order is not
+   English word order.
+6. **No TURN and no HTTPS**, so it is not deployable as it stands.
+7. **The ISL dataset's licence cannot be confirmed** because its identity was
+   never recorded.
+8. **Two participants only.**
+9. **Live accuracy with a real signer is not recorded** — all figures are on
+   dataset samples.
+
+### Q29. How is this different from existing sign-language recognition work?
+
+It is not a better recogniser, and claiming so would be wrong. Published work on
+INCLUDE and WLASL reports higher accuracy on larger vocabularies with much larger
+models.
+
+What is different is the **integration**: the recogniser runs inside a working
+two-way video call, with the tracking on-device, a shared caption protocol that
+both translation directions use, and a persisted transcript — rather than as a
+standalone classifier demo on pre-recorded clips. The engineering contribution is
+the pipeline from camera to caption to database, and the honesty measures around
+the measurement.
+
+### Q30. If you had two more weeks, what would you do?
+
+In this order: fix the three confirmed defects (K-1, K-2, K-3 — all small);
+record the ISL dataset's identity and licence; deploy behind HTTPS with a TURN
+server so it works off one Wi-Fi network; and then try to obtain a dataset with
+signer labels so the generalisation question can actually be answered. The last
+one matters most scientifically; the first matters most for anyone using it.
+
+---
+
+# 21. Glossary
+
+| Term | Meaning |
+|---|---|
+| **ASL** | American Sign Language. Its manual alphabet is **one-handed**. |
+| **ASGI** | Asynchronous Server Gateway Interface. The Python standard for async web servers; what lets FastAPI serve WebSockets. |
+| **bcrypt** | A deliberately slow password-hashing algorithm. The slowness is the security property. |
+| **Bidirectional LSTM** | An LSTM that reads a sequence both forwards and backwards, so the end of a sign can inform the interpretation of its beginning. |
+| **Blob** | A browser object holding raw binary data. Used for recorded audio and for triggering file downloads. |
+| **CDN** | Content Delivery Network. A geographically distributed host for static files, such as Google Fonts. |
+| **Confusion matrix** | A grid showing, for each true class, how often the model predicted each class. The diagonal is correct answers. |
+| **CORS** | Cross-Origin Resource Sharing. The browser rule that a page on one origin cannot call another unless that server opts in. |
+| **CTranslate2** | A fast inference engine for transformer models; what faster-whisper runs on. |
+| **Dropout** | A training technique that randomly zeroes some activations, forcing the network not to depend on any single path. |
+| **Early stopping** | Stopping training when validation performance stops improving, to avoid overfitting. |
+| **Epoch** | One complete pass through the training data. |
+| **ER diagram** | Entity-Relationship diagram. A picture of database tables and how they reference each other. |
+| **ffmpeg** | A command-line tool that converts between audio and video formats. Used here as a subprocess to turn browser Opus into PCM. |
+| **Fingerspelling** | Spelling a word letter by letter with handshapes, rather than using a whole-word sign. |
+| **Glare** | In WebRTC, when both peers send an offer at the same time and the negotiation collides. |
+| **ICE** | Interactive Connectivity Establishment. How WebRTC finds a network path between two peers. |
+| **InnoDB** | MySQL's default storage engine. Supports transactions and foreign keys. |
+| **int8 quantisation** | Storing model weights as 8-bit integers instead of 32-bit floats. Smaller and faster, slightly less precise. |
+| **ISL** | Indian Sign Language. Its manual alphabet is **two-handed**, which is why it needs a 126-feature model rather than 63. |
+| **JSX** | The HTML-like syntax inside React JavaScript files. |
+| **JWT** | JSON Web Token. A signed, base64-encoded set of claims used instead of a server-side session. Signed, **not encrypted** — anyone holding it can read it. |
+| **Landmark** | One tracked point on a hand. MediaPipe returns 21 per hand, each with x, y and z. |
+| **localStorage** | Browser storage that persists until explicitly cleared, scoped to one origin. |
+| **LSTM** | Long Short-Term Memory. A recurrent neural network layer that carries state across timesteps, so it can represent sequences. |
+| **Macro average** | An average that treats every class equally, regardless of how many samples each has. |
+| **Masking** | A Keras layer that tells later layers to skip timesteps matching a given value — here, all-zero frames where no hand was detected. |
+| **MediaPipe** | Google's on-device vision library. Its `HandLandmarker` is what finds hands in this project. |
+| **MediaRecorder** | A browser API that records a media stream into compressed chunks. |
+| **MLP** | Multi-Layer Perceptron. A plain neural network of fully-connected layers. |
+| **NAT** | Network Address Translation. What a home router does, and the reason a browser does not know its own public address. |
+| **Normalisation** (here) | Moving the wrist to the origin and scaling so the furthest landmark sits at 1.0, making features position- and scale-invariant. |
+| **ORM** | Object-Relational Mapper. Lets database rows be used as Python objects. SQLAlchemy is the one used here. |
+| **Opus** | An audio codec, what browsers typically record into. |
+| **OpenAPI** | A machine-readable description of an HTTP API. FastAPI generates it automatically; `/docs` renders it. |
+| **Perfect negotiation** | The standard WebRTC pattern where one peer is "polite" and yields on a collision, so simultaneous renegotiation cannot deadlock. |
+| **Pose-disjoint split** | Splitting data so that near-duplicate poses are never spread across train and test. Prevents inflated accuracy from near-identical video frames. |
+| **Pydantic** | A Python library that validates data against typed models. Defines this project's wire format. |
+| **RMS** | Root Mean Square. A measure of signal amplitude; used here as a loudness measure for voice-activity detection. |
+| **SDP** | Session Description Protocol. The text format describing what codecs and tracks a WebRTC peer supports. |
+| **Segment id** | A producer-generated identifier for one utterance, stable across every interim update and the final. The key to both caption replacement and transcript idempotency. |
+| **sessionStorage** | Browser storage that is cleared when the tab closes. |
+| **SFU** | Selective Forwarding Unit. A media server that forwards streams between many participants; what a multi-party call would need. |
+| **Softmax** | The final layer that turns raw scores into probabilities summing to 1. |
+| **SPA** | Single-Page Application. One HTML page whose content JavaScript swaps as you navigate. |
+| **SQLAlchemy** | The Python ORM used here. |
+| **STUN** | Session Traversal Utilities for NAT. Tells a browser what its own public address looks like. |
+| **Temporal dead zone** | The period between a `const` or `let` being hoisted and its initialiser running, during which reading it throws. The cause of the eleven-error crash. |
+| **TensorFlow / Keras** | The machine-learning framework used to train and run all three models. |
+| **TURN** | Traversal Using Relays around NAT. Relays media when a direct peer-to-peer path is impossible. **Not configured in this project.** |
+| **utf8mb4** | MySQL's real 4-byte Unicode character set, as opposed to the older 3-byte `utf8` alias. |
+| **VAD** | Voice Activity Detection. Deciding which parts of an audio stream contain speech. |
+| **Vite** | The frontend build tool and development server. |
+| **Vitest** | The frontend test runner, which shares Vite's transform pipeline. |
+| **WASM** | WebAssembly. A binary format that runs at near-native speed in a browser; how MediaPipe runs client-side. |
+| **WebRTC** | Web Real-Time Communication. Lets two browsers exchange audio and video directly. |
+| **Web Speech API** | A browser API for speech recognition. Chromium-only in practice, and in Chrome it sends audio to Google. |
+| **WebSocket** | A persistent two-way connection between browser and server, unlike HTTP's request-and-response. |
+| **Weighted average** | An average weighted by how many samples each class has — so large classes dominate it. |
+| **Whisper** | OpenAI's speech-recognition model. Used here via faster-whisper, on CPU, as the fallback engine. |
+| **WLASL** | Word-Level American Sign Language, a video dataset. Referenced in the code but **INCLUDE** is what Model B was actually trained on. |
+| **Word error rate (WER)** | The standard measure for continuous recognition: (substitutions + deletions + insertions) ÷ reference words. |
+
+---
+
+# Appendix A: how this document was verified
+
+## A.1 Confirmed by running something
+
+Each of these was executed while writing this document, on 2026-10-05.
+
+| What | Command or method | Result used in |
+|---|---|---|
+| **Route inventory** | Imported the FastAPI app and iterated `app.routes` | 22 HTTP entries, 3 WebSockets, 18 application endpoints — §7.1 |
+| **Endpoint schemas** | Generated `app.openapi()` and parsed the spec | Every request/response type and status code — §7.2–7.5 |
+| **All 24 Pydantic schemas** | Parsed `components.schemas` from the OpenAPI spec | Field names, types and constraints — §7 |
+| **Live API behaviour** | Real HTTP calls against the running backend as the seeded demo user | Every example request and response in §7 |
+| **Defect K-1** | Wrote a temporary Vitest test importing the **real** `services/stt/index.js` with globals stubbed before import, ran it, then deleted the test | §11.2, §19.1 — `resolveProvider('browser')` throws `TypeError` |
+| **Defect K-2** | `POST /api/transcripts` with `segment_id: "doc-example-1"`; response returned `null` | §7.4.1, §19.1 |
+| **Defect K-3** | `POST` then `GET` focus-events, cross-checked against `SELECT ... FROM focus_events` | §7.3.9, §19.1 — DB holds 4200, event reports null |
+| **MySQL version** | `SELECT VERSION()` | **9.7.1** — §9.1 |
+| **Live schema** | `SHOW TABLES`, `SHOW FULL COLUMNS`, `SHOW CREATE TABLE` on all five tables | §9.2–9.7 |
+| **Schema comparison** | Parsed `database/schema.sql` and diffed column sets against the live database programmatically | §9.8 — 5 tables, 34 columns, **no differences** |
+| **Model parameter counts** | Loaded all three `.keras` files with TensorFlow 2.16.2 and called `count_params()` and iterated `model.layers` | §10.4 — 60,892 / 77,475 / 442,537 |
+| **Model file sizes** | `stat` on each file | 771,418 / 970,418 / 5,375,649 bytes — §10.4 |
+| **Model input/output shapes** | `model.input_shape`, `model.output_shape` | Confirmed `(None, 30, 132)` for Model B — §10.4.3, K-6 |
+| **Processed dataset shapes** | `np.load(..., mmap_mode='r').shape` on all 18 `.npy` files | §10.2 split sizes; confirmed 132 features — K-6 |
+| **All ML metrics** | Read the 14 JSON artefacts in `ml/models/` | §10.2, §10.4, §10.5 |
+| **Backend test suite** | `pytest backend/tests -q` | **258 passed, 2 skipped** — §17.3 |
+| **Per-file test counts** | `pytest --collect-only -q`, grouped | §17.4 |
+| **Skip reasons** | `pytest -q -rs` | §17.3 |
+| **Frontend lint** | `npm run lint` | **0 errors, 6 warnings** — §17.3 |
+| **Frontend tests** | `npx vitest run` | **13 passed** — §17.3 |
+| **Frontend build** | `npx vite build` | Succeeds — §17.1 |
+| **Route count** | Counted `<Route path=` in `App.jsx` | **10** — §6.2 |
+| **`/health` output** | `GET http://127.0.0.1:8000/health` | All three models loaded, Whisper `base` ready — §7.5.1 |
+| **ffmpeg version** | `ffmpeg -version` | **9.0.1** — §8.8 |
+| **MediaPipe asset sizes** | `ls -la frontend/public/models/` and `wasm/` | §8.2 |
+| **Dependency versions** | Parsed `backend/requirements.txt` and `frontend/package.json` | §4 — every version |
+| **Git history** | `git log`, `git rev-list --count`, commits per day | **52 commits**, 2026-07-27 to 2026-10-05 — §18 |
+| **Dead code** | `grep -rn` for each exported symbol across `src/` and `backend/` | §19.4 |
+| **Doc link integrity** | A script resolving every relative markdown link in the seven root documents | 45 links, all resolve |
+| **ISL dataset folder count** | `ls ml/data/raw/isl_alphabet \| wc -l` | **35** class folders — §10.2.2 |
+
+## A.2 Confirmed by reading code only
+
+These are accurate descriptions of what the source says, but were not executed.
+
+| What | Why not run |
+|---|---|
+| The eight sequence diagrams in §3 | Each describes a multi-component runtime flow. The individual pieces were read; the end-to-end flows need two browsers |
+| Client-side gate behaviour in `useSignCaptions` | Requires live landmark input from a camera |
+| `PredictionSmoother` and `SequenceBuffer` behaviour | Covered by 39 backend tests which **were** run, but I did not separately trace them |
+| `useWebRTC` perfect negotiation | Requires two real peers |
+| `useScreenShare` track handling | Requires a real screen picker |
+| `useInterviewMode` detection | Fullscreen and Keyboard Lock cannot run in a terminal |
+| Browser support matrix in §16.7 | **Derived from API availability**, not measured in Firefox or Safari |
+| Design-system values in §6.7 | Read from `tailwind.config.js` and `index.css`. The **contrast ratios are as recorded in that file's comments**; I did not independently recompute them |
+| The `?debug=1` overlay contents | Read from `DebugOverlay.jsx` |
+| Setup-script behaviour | Read from `scripts/setup.sh`; not re-run |
+| Docker build and compose | Read from the Dockerfiles and `docker-compose.yml`; **not built or started** |
+
+## A.3 Could not be confirmed
+
+| What | Why | What would be needed |
+|---|---|---|
+| **The ISL letters dataset's name, source URL and licence** | Never recorded anywhere. `kaggle_slug` is empty, the citation is a placeholder, and `isl_dataset_manifest.json` carries the **ASL** dataset's details | Whoever downloaded it must identify it |
+| **Live accuracy with a real signer** | All figures are on dataset samples | A signer, a camera, and a labelled session |
+| **Whether any model generalises to an unseen signer** | No dataset has signer labels | A dataset with signer identity, or a recorded evaluation session with new signers |
+| **That a caption crosses between two browsers** | Needs two real clients | Two browser profiles, a camera and a voice |
+| **That WebRTC media actually flows** | The tests stub `RTCPeerConnection` | Two browsers |
+| **That screen share media arrives** | Signalling only is verified | Two browsers |
+| **Interview Mode enforcement in practice** | Fullscreen and Keyboard Lock need a browser | Chrome, Firefox and Safari |
+| **How any of it looks** | No visual testing exists | A human looking at it, at desktop and narrow widths |
+| **Firefox and Safari behaviour** | Only Chromium-family APIs were reasoned about | Those browsers |
+| **Whisper transcription quality** | Needs a voice | A spoken session |
+| **`MOTION_LOOKBACK_FRAMES = 20` sufficiency in practice** | Measured on synthetic idle input only | 30 seconds of real resting hands at a camera |
+| **Docker stack working end to end** | Not built | `docker compose up --build` |
+| **Model A's `nothing`-class row count of 14** | Read from the manifest; the raw extraction was not re-run | Re-running extraction |
+
+## A.4 Side effects of this verification
+
+Verifying the live API created real rows in the development database. They are
+left in place rather than deleted, because deleting rows is a destructive action
+that was not requested:
+
+| Table | Rows added | Identifying detail |
+|---|---|---|
+| `meetings` | 1 | id **139**, code `4T9-7M2`, title "Documentation example meeting" |
+| `meeting_participants` | 1 | id **157** |
+| `focus_events` | 2 | ids **25** and **26** |
+| `transcripts` | 1 | id **51**, content "good morning" |
+
+That meeting also had Interview Mode switched on by the `PATCH` example.
+No application code was modified at any point.
+
+## A.5 Document self-check
+
+Counts in this document were cross-checked against the code after writing:
+
+| Item | Counted in code | Stated in document | Match |
+|---|---|---|---|
+| Frontend routes (`<Route>` elements) | 10 | 10 (§6.2) | ✅ |
+| Pages rendered by a route | 9 | 9 (§6.2) | ✅ |
+| FastAPI HTTP route entries | 22 | 22 (§7.1) | ✅ |
+| Application HTTP endpoints | 18 | 18 (§7.1) | ✅ |
+| WebSocket endpoints | 3 | 3 (§7.6) | ✅ |
+| `/ws/predict` message types | 5 client + 6 server = **11** | 11 (§7.6.1) | ✅ |
+| `/ws/signal` message types | 7 client + 6 server = **13** | 13 (§7.6.2) | ✅ |
+| `/ws/transcribe` message types | 3 client + 3 server = **6** | 6 (§7.6.3) | ✅ |
+| Database tables | 5 | 5 (§9) | ✅ |
+| Database columns | 34 | 34 (§9.1, §9.8) | ✅ |
+| Pydantic schemas | **20** of ours, plus 3 FastAPI-generated = 23 in the spec | all 20 listed (§7) | ✅ |
+| Backend test files | 15 | 15 (§17.4) | ✅ |
+| Backend tests | 258 passed, 2 skipped | 258 / 2 (§17.3) | ✅ |
+| Frontend tests | 13 | 13 (§17.6) | ✅ |
+| Keras models | 3 | 3 (§10.4) | ✅ |
+| Git commits | 52 | 52 (§18) | ✅ |
+
+> **Three counts were wrong on the first pass and have been corrected in the
+> text above**, which is recorded here rather than hidden. The WebSocket headings
+> originally read "11 / 10 / 5 message types"; counting the handlers and emitters
+> in the source gives **11 / 13 / 6**. The schema count originally read 24; the
+> OpenAPI spec contains **20** of our schemas plus 3 FastAPI generates for its own
+> error shapes. The tables themselves were complete throughout — only the summary
+> numbers were off, and they now match.
+
+Verification method for the message-type counts:
+
+```
+/ws/predict     client: grep 'message_type == "..."' + the landmarks else-branch  -> 5
+                server: grep '"type": "..."' in inference.py + caption from
+                        captions.py::build_caption_event                          -> 6
+/ws/signal      client: RELAYED_TYPES (6) + ping                                  -> 7
+                server: joined, peer-joined, peer-left, no-peers, pong, error      -> 6
+/ws/transcribe  client: binary audio frame, config, flush                          -> 3
+                server: ready, transcript, error                                   -> 3
+```
+
+**Every route, endpoint, WebSocket event, table and column appears in a table in
+this document.** No list was abbreviated with "and so on".
+
+---
+
+*End of document.*
