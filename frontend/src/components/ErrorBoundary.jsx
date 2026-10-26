@@ -33,16 +33,16 @@ export default class ErrorBoundary extends Component {
     if (!error) return this.props.children;
 
     return (
-      <main className="grid min-h-screen place-items-center p-6">
-        <div className="panel max-w-lg" role="alert">
-          <h1 className="text-2xl font-bold">Something went wrong</h1>
+      <main className="grid min-h-screen place-items-center bg-light-surface p-6">
+        <div className="card max-w-lg p-6 shadow-dialog" role="alert">
+          <h1 className="text-xl font-medium text-light-text">Something went wrong</h1>
 
-          <p className="mt-2 text-slate-300">
+          <p className="mt-2 text-sm text-light-muted">
             BridgeTalk hit an unexpected error and stopped rendering this screen.
             Your meeting has not been deleted — reloading usually recovers it.
           </p>
 
-          <pre className="mt-4 overflow-x-auto rounded-lg bg-ink-900 p-3 text-xs text-slate-400">
+          <pre className="mt-4 overflow-x-auto rounded-card bg-light-surface p-3 text-xs text-light-muted">
             {error.message}
           </pre>
 
@@ -52,8 +52,8 @@ export default class ErrorBoundary extends Component {
               Reload
             </button>
             <button type="button" onClick={() => { window.location.href = '/'; }}
-                    className="rounded-lg border border-ink-700 px-4 py-2 hover:bg-ink-700">
-              Back to dashboard
+                    className="btn-outlined">
+              Back to home
             </button>
           </div>
         </div>

@@ -46,6 +46,11 @@ from app.ml.predictor import (
 )
 from app.ml.sequence import SequenceBuffer
 from app.ml.smoothing import NEUTRAL_LABEL, PredictionSmoother, SmoothingConfig
+from app.ws.captions import (
+    build_caption_event,
+    persist_final_caption,
+    validate_caption,
+)
 from app.models.meeting import Meeting
 from app.models.user import User
 from app.ws.connection_manager import inference_manager
@@ -106,8 +111,55 @@ def _meeting_exists(meeting_code: str) -> bool:
         return meeting is not None and meeting.ended_at is None
 
 
+def _top2_margin(probabilities) -> float:
+    """Gap between the best and second-best class.
+
+    Confidence alone cannot distinguish "certain" from "cannot tell these two
+    apart": a model may be 0.72 on the winner while the runner-up sits at
+    0.70. The client requires a clear margin before committing a sign, and it
+    cannot compute one without this.
+    """
+    if probabilities is None or len(probabilities) < 2:
+        return 1.0
+    ordered = sorted(probabilities, reverse=True)
+    return float(ordered[0] - ordered[1])
+
+
 def _error(code: str, message: str) -> dict[str, Any]:
     return {"type": "error", "code": code, "message": message}
+
+
+def _room_state(meeting_code: str) -> dict[str, Any] | None:
+    """The meeting's current room-level state, for the `connected` handshake.
+
+    Read fresh from the database on every connection rather than cached,
+    because the whole point is to be correct for a client that was
+    disconnected while something changed.
+
+    Returns None for a code with no meeting row — notably the `DEMO` code used
+    by the standalone /detect page, which is not a real meeting.
+    """
+    try:
+        with SessionLocal() as session:
+            meeting = session.scalar(select(Meeting).where(Meeting.code == meeting_code))
+            if meeting is None:
+                return None
+            return {
+                "is_interview_mode": bool(meeting.is_interview_mode),
+                "interview_mode_started_at": (
+                    meeting.interview_mode_started_at.isoformat()
+                    if meeting.interview_mode_started_at
+                    else None
+                ),
+                "host": {"id": meeting.host_id},
+                "ended_at": meeting.ended_at.isoformat() if meeting.ended_at else None,
+            }
+    except Exception:  # noqa: BLE001
+        # A failure here must not stop the socket connecting. Sign recognition
+        # does not depend on room state, and a client that gets no `meeting`
+        # block simply keeps whatever it already had.
+        logger.exception("Could not read room state for %s", meeting_code)
+        return None
 
 
 def _handle_static_frame(
@@ -144,7 +196,7 @@ def _handle_static_frame(
         return _error("INVALID_MESSAGE", f"Bad landmark data: {exc}")
 
     try:
-        label, confidence, _ = predictor.predict(features)
+        label, confidence, probabilities = predictor.predict(features)
     except ModelNotLoadedError as exc:
         return _error("MODEL_NOT_LOADED", str(exc))
     except ValueError as exc:
@@ -157,6 +209,8 @@ def _handle_static_frame(
         "mode": STATIC_MODE,
         "label": result.label,
         "confidence": round(result.confidence, 4),
+        # The runner-up gap, so the client can reject near-ties.
+        "margin": round(_top2_margin(probabilities), 4),
         "stable": result.stable,
         "emitted": result.emitted,
         "sentence": result.sentence,
@@ -207,7 +261,7 @@ def _handle_isl_frame(
         return _error("INVALID_MESSAGE", f"Bad landmark data: {exc}")
 
     try:
-        label, confidence, _ = isl_predictor.predict(features)
+        label, confidence, probabilities = isl_predictor.predict(features)
     except ModelNotLoadedError as exc:
         return _error("MODEL_NOT_LOADED", str(exc))
     except ValueError as exc:
@@ -220,6 +274,8 @@ def _handle_isl_frame(
         "mode": ISL_MODE,
         "label": result.label,
         "confidence": round(result.confidence, 4),
+        # The runner-up gap, so the client can reject near-ties.
+        "margin": round(_top2_margin(probabilities), 4),
         "stable": result.stable,
         "emitted": result.emitted,
         "sentence": result.sentence,
@@ -291,7 +347,7 @@ def _handle_dynamic_frame(
         }
 
     try:
-        label, confidence, _ = dynamic_predictor.predict(window)
+        label, confidence, probabilities = dynamic_predictor.predict(window)
     except ModelNotLoadedError as exc:
         return _error("MODEL_NOT_LOADED", str(exc))
     except ValueError as exc:
@@ -304,6 +360,8 @@ def _handle_dynamic_frame(
         "mode": DYNAMIC_MODE,
         "label": result.label,
         "confidence": round(result.confidence, 4),
+        # The runner-up gap, so the client can reject near-ties.
+        "margin": round(_top2_margin(probabilities), 4),
         "stable": result.stable,
         "emitted": result.emitted,
         "sentence": result.sentence,
@@ -391,6 +449,12 @@ async def predict_socket(
             "type": "connected",
             "meeting_code": normalized_code,
             "user": {"id": user.id, "name": user.name},
+            # Room state, so a client that JOINS or RECONNECTS learns it from
+            # the handshake rather than only from a live broadcast it may have
+            # missed while its socket was down. This is the other half of the
+            # Bug 3 fix: the broadcast covers everyone currently connected,
+            # this covers everyone who connects next.
+            "meeting": _room_state(normalized_code),
             "model": predictor.describe(),
             # Advertised so the UI can enable or hide each mode rather than
             # offering one that cannot work on this deployment.
@@ -451,25 +515,54 @@ async def predict_socket(
             # signalling one because this is the meeting's *text* channel —
             # both translation directions belong together, and a dropped video
             # call must not take the captions down with it.
-            if message_type == "speech":
-                text = (message.get("text") or "").strip()
-                if not text:
+            # --- captions, from EITHER source -----------------------------
+            # One handler for sign and speech. They used to travel two
+            # different ways, which is how the sign path ended up broadcasting
+            # the whole accumulated sentence while speech sent only the phrase.
+            if message_type == "caption":
+                problem = validate_caption(message)
+                if problem:
+                    await inference_manager.send_personal(
+                        connection, _error("INVALID_MESSAGE", problem)
+                    )
                     continue
 
-                await inference_manager.broadcast(
-                    normalized_code,
-                    {
-                        "type": "subtitle",
-                        "from": {"id": user.id, "name": user.name},
-                        "source": "speech",
-                        "text": text,
-                        # Interim results update the live subtitle but must not
-                        # be written to the transcript — the browser revises
-                        # them word by word as it hears more.
-                        "is_final": bool(message.get("is_final", False)),
-                    },
-                    exclude=connection,
+                is_final = bool(message.get("is_final", False))
+                event = build_caption_event(
+                    meeting_code=normalized_code,
+                    segment_id=message["segment_id"],
+                    speaker_id=user.id,
+                    speaker_name=user.name,
+                    source=message["source"],
+                    text=message["text"],
+                    is_final=is_final,
+                    confidence=message.get("confidence"),
                 )
+
+                # Broadcast to EVERYONE, sender included. Excluding the sender
+                # meant each participant assembled their caption list from a
+                # different code path — local state for their own words, the
+                # socket for the other person's — and the two disagreed. Now
+                # there is one source of truth for both sides.
+                await inference_manager.broadcast(normalized_code, event)
+
+                # Persist once, on the final event, keyed by segment_id. The
+                # DEMO code is not a real meeting, so nothing is stored for it.
+                if is_final and normalized_code != "DEMO":
+                    with SessionLocal() as session:
+                        meeting = session.scalar(
+                            select(Meeting).where(Meeting.code == normalized_code)
+                        )
+                        if meeting is not None:
+                            persist_final_caption(
+                                session,
+                                meeting_id=meeting.id,
+                                user_id=user.id,
+                                segment_id=message["segment_id"],
+                                source=message["source"],
+                                text=message["text"],
+                                confidence=message.get("confidence"),
+                            )
                 continue
 
             if message_type != "landmarks":
@@ -524,32 +617,19 @@ async def predict_socket(
 
             result = result_message.pop("_result")
             await inference_manager.send_personal(connection, result_message)
-
-            # --- broadcast to the other participant ------------------------
-            # Only accepted letters are broadcast, never per-frame flicker, so
-            # the other person's subtitle updates when something was actually
-            # recognised rather than 10 times a second.
+            # NOTE: this loop no longer broadcasts anything.
             #
-            # `result` is None while the dynamic buffer is still filling — those
-            # frames produced no prediction at all, so there is nothing to send.
-            if result is not None and result.emitted is not None and normalized_code != "DEMO":
-                await inference_manager.broadcast(
-                    normalized_code,
-                    {
-                        "type": "subtitle",
-                        "from": {"id": user.id, "name": user.name},
-                        "source": "sign",
-                        # Which model produced this, so the transcript can
-                        # record that a word came from Model B — whose accuracy
-                        # is materially lower — rather than presenting both
-                        # sources as equally reliable.
-                        "mode": active_mode,
-                        "text": result.sentence,
-                        "emitted": result.emitted,
-                        "confidence": round(result.confidence, 4),
-                    },
-                    exclude=connection,
-                )
+            # It used to send `result.sentence` — the whole ACCUMULATED
+            # sentence — as the caption text, which is why captions grew
+            # without bound and the transcript stored the same sentence
+            # over and over with one more word each time.
+            #
+            # The client now owns segmentation: it receives the per-frame
+            # prediction above, decides where an utterance starts and ends,
+            # and sends a `caption` message carrying a segment_id. Keeping
+            # that decision in one place is the point — it was previously
+            # split between a Python smoother and a JavaScript buffer that
+            # each held half of it and disagreed.
 
     except WebSocketDisconnect:
         # Normal: the tab closed or the user left the meeting.

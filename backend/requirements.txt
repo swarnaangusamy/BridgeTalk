@@ -48,6 +48,43 @@ opencv-python==4.10.0.84
 scikit-learn==1.5.2
 pandas==2.2.3
 
+# --- Speech to text (Whisper fallback) --------------------------------------
+# ONLY needed for the Whisper speech provider. The default provider is the
+# browser's Web Speech API, which needs nothing here — a deployment that never
+# switches engines can leave these uninstalled and the backend still starts.
+# backend/app/ws/transcribe.py imports faster_whisper lazily and reports
+# MODEL_NOT_LOADED rather than crashing when it is absent.
+#
+# NOTE: installing the package does NOT download the model. The `base` model
+# (~150 MB) is fetched on first use into ml/models/whisper/. Pre-download it
+# before a demo:
+#
+#   HF_HUB_DISABLE_XET=1 python -c "from faster_whisper import WhisperModel; \
+#       WhisperModel('base', device='cpu', compute_type='int8', \
+#                    download_root='ml/models/whisper')"
+#
+# HF_HUB_DISABLE_XET=1 is not optional folklore. huggingface_hub pulls in
+# `hf-xet`, its newer transfer backend, and on this machine that stalled at
+# 0 bytes indefinitely with no error — the small tokenizer files arrived and
+# the 145 MB weights never started. Disabling it forces the plain HTTP path,
+# which completed in ~10 minutes.
+#
+# ffmpeg is also required and is NOT a pip package:
+#   macOS:  brew install ffmpeg
+#   Ubuntu: sudo apt install ffmpeg
+faster-whisper==1.0.3
+# Pinned explicitly: faster-whisper's own floor is looser than what we have
+# tested against, and CTranslate2 breaks its Python ABI between minor versions.
+# 4.8.1 is what pip resolves here and what this project was verified against;
+# it does NOT drag numpy to 2.x, which would break the TensorFlow 2.16 pin.
+ctranslate2==4.8.1
+
+# --- PDF transcript export --------------------------------------------------
+# Pure Python, no system libraries. Imported lazily inside the one endpoint
+# that needs it, so a deployment that never exports a PDF pays nothing at
+# startup — the same pattern as TensorFlow and faster-whisper.
+reportlab==4.2.5
+
 # --- Plots / reporting ------------------------------------------------------
 matplotlib==3.9.2
 seaborn==0.13.2

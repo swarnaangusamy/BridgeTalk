@@ -1,0 +1,75 @@
+{
+  "model": "isl_model.keras",
+  "model_type": "MLP",
+  "task": "ISL static fingerspelling classification (two-handed)",
+  "num_hands": 2,
+  "trained_at": "2026-10-04T11:04:56.895188+00:00",
+  "normalization_version": 1,
+  "input_shape": [
+    126
+  ],
+  "output_shape": [
+    35
+  ],
+  "class_names": [
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6",
+    "7",
+    "8",
+    "9",
+    "A",
+    "B",
+    "C",
+    "D",
+    "E",
+    "F",
+    "G",
+    "H",
+    "I",
+    "J",
+    "K",
+    "L",
+    "M",
+    "N",
+    "O",
+    "P",
+    "Q",
+    "R",
+    "S",
+    "T",
+    "U",
+    "V",
+    "W",
+    "X",
+    "Y",
+    "Z"
+  ],
+  "source_dataset": "Indian Sign Language alphabet",
+  "self_recorded_data": false,
+  "architecture": "Dense256-BN-Drop0.3 / Dense128-BN-Drop0.3 / Dense64 / Softmax",
+  "hyperparameters": {
+    "optimizer": "adam",
+    "learning_rate": 0.001,
+    "loss": "sparse_categorical_crossentropy",
+    "batch_size": 64,
+    "max_epochs": 100,
+    "epochs_run": 20,
+    "early_stopping_patience": 10,
+    "seed": 42
+  },
+  "metrics": {
+    "train_accuracy": 0.9997,
+    "val_accuracy": 0.9919,
+    "val_loss": 0.0589,
+    "train_val_gap": 0.0078
+  },
+  "training_time_seconds": 85.1,
+  "samples": {
+    "train": 103128,
+    "val": 2455
+  }
+}

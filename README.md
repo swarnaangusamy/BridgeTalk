@@ -158,8 +158,8 @@ graph TB
     end
 
     subgraph Browser2["Browser — hearing participant"]
-        SUB["SubtitleBar + TranscriptPanel"]
-        STT["useSpeechToText<br/>Web Speech API"]
+        SUB["CaptionRail + LiveTranscriptPanel"]
+        STT["useSpeechCaptions<br/>Web Speech API or Whisper"]
         RTC2["useWebRTC"]
     end
 
@@ -249,14 +249,18 @@ Tracing one letter from hand to screen. File and function named at each step.
     stable, sentence, latency_ms}` back to the signer. Median 6.2 ms.
 
 11. **Broadcast.** If a letter was *accepted*, `inference_manager.broadcast()`
-    sends a `subtitle` message to the other participant — accepted letters
-    only, never per-frame flicker.
+    sends a `caption` message to EVERY participant including the sender —
+    accepted tokens only, never per-frame flicker. One protocol serves both
+    directions; see section 7.9.
 
-12. **Display.** The hearing participant's
-    [`SubtitleBar.jsx`](frontend/src/components/SubtitleBar.jsx) shows the text
-    in an `aria-live` region, and
-    [`TranscriptPanel.jsx`](frontend/src/components/TranscriptPanel.jsx) appends
-    it to the running record.
+12. **Display.** Every participant's
+    [`CaptionRail.jsx`](frontend/src/components/meeting/CaptionRail.jsx) shows
+    the text in an `aria-live` region, replacing the line with that
+    `segment_id` rather than appending — which is what stops a caption growing
+    into "warm warm warm". The running record is in
+    [`LiveTranscriptPanel.jsx`](frontend/src/components/meeting/LiveTranscriptPanel.jsx),
+    which reads the persisted rows from the database rather than this list, so
+    it agrees with the exported file.
 
 13. **Persistence.** At a word boundary (`space`), `MeetingRoom.jsx` posts the
     completed word to `POST /api/transcripts`, which writes it to MySQL.
@@ -397,7 +401,9 @@ recognition. For a tool handling private conversations that is a genuine privacy
 cost, and it sits oddly beside our "video never leaves your machine" claim for
 the sign direction. Whisper is the documented upgrade path.
 
-*Key files:* [`useSpeechToText.js`](frontend/src/hooks/useSpeechToText.js).
+*Key files:* [`useSpeechCaptions.js`](frontend/src/hooks/useSpeechCaptions.js),
+and [`services/stt/`](frontend/src/services/stt/) which puts Web Speech and
+Whisper behind one interface.
 
 ---
 
@@ -953,24 +959,69 @@ tabs would be the same user.
 Log in as `deaf.demo@example.com` in one and `hearing.demo@example.com` in the
 other, create a meeting in the first, join by code in the second.
 
-### Two laptops on one network
+### Testing with two devices
 
-Start the backend as usual (it already binds `0.0.0.0`), then serve the frontend
-with `--host`:
+**Two windows on one laptop is not enough for everything.** Interview mode and
+speech recognition both need two real devices:
+
+- **Interview mode** detects the window losing focus. Clicking the *other*
+  window on the same laptop is a genuine focus change, so every interaction
+  records a violation and the blocking overlay fights you.
+- **Speech recognition** runs on the microphone. Two windows share one
+  microphone, so both recognisers hear the same voice and caption it twice.
+
+`npm run dev:lan` exists for this. It turns on three things at once:
+
+| | Why |
+|---|---|
+| `host: true` | Listen on every interface, so another device on the Wi-Fi can reach it |
+| **HTTPS**, via `@vitejs/plugin-basic-ssl` | Not optional. `getUserMedia` requires a *secure context*, and only `localhost` is exempt — over plain `http://192.168.x.x` the camera prompt never appears at all |
+| A **proxy** for `/api`, `/ws` and `/health` | So the second device needs **one** address and trusts **one** certificate. Without it the browser must also accept a second self-signed certificate for the backend, which it will not do silently for a WebSocket — the socket just fails with no usable error |
+
+**Steps:**
 
 ```bash
-cd frontend && npm run dev -- --host
+# 1. Backend as usual. It already binds 0.0.0.0.
+./scripts/run_backend.sh
+
+# 2. Frontend in LAN mode, with HTTPS and the API proxied through it.
+cd frontend && npm run dev:lan
 ```
 
-On the second laptop, open `http://<first-laptop-ip>:5173`.
+Vite prints two addresses. Take the **Network** one, for example:
 
-> **This will not get camera access**, and the reason is not a bug in
-> BridgeTalk. Browsers only grant `getUserMedia` in a *secure context* — HTTPS,
-> or `localhost`. A plain `http://192.168.x.x` origin is neither. The workarounds
-> are an HTTPS tunnel (e.g. `ngrok http 5173`), a self-signed certificate via
-> `@vitejs/plugin-basic-ssl`, or Chrome's
-> `--unsafely-treat-insecure-origin-as-secure` flag. For a review demo, two
-> windows on one machine is the reliable path.
+```
+  ➜  Local:   https://localhost:5173/
+  ➜  Network: https://192.168.1.42:5173/
+```
+
+```bash
+# 3. Allow that origin in the repository-root .env, then restart the backend.
+CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173,https://192.168.1.42:5173
+```
+
+4. On the **second device**, open the Network address. The browser will warn
+   about the self-signed certificate — choose **Advanced → Proceed**. This is
+   expected: the certificate is generated locally and signed by nobody.
+5. Sign in as a different user on each device, create a meeting on one, join by
+   code on the other.
+
+**Notes**
+
+- Both devices must be on the **same Wi-Fi**, and some guest networks block
+  device-to-device traffic entirely — WebRTC will not connect there, and no
+  amount of configuration fixes it without a TURN server.
+- The certificate must be accepted **once per device**.
+- `BRIDGETALK_BACKEND` overrides the proxy target if the API is not on
+  `127.0.0.1:8000`.
+- **None of this touches the production build.** `vite build` is unaffected, and
+  `npm run dev` still serves plain HTTP on localhost only.
+
+### Two participants on one laptop — still fine for captions
+
+For sign-to-text and the caption pipeline, two windows on one machine is the
+quickest path and is what the acceptance checks assume. Use it for anything
+except interview mode and speech.
 
 ---
 
@@ -998,7 +1049,7 @@ BridgeTalk/
 │   │   ├── config.py       pydantic-settings; the only reader of .env
 │   │   ├── database.py     engine + session factory
 │   │   └── main.py         app, CORS, routers, model load at startup
-│   ├── tests/              136 tests
+│   ├── tests/              276 tests
 │   └── requirements.txt    every version pinned
 │
 ├── ml/
@@ -1014,16 +1065,35 @@ BridgeTalk/
 │   └── models/             .keras (gitignored) + JSON side-cars (committed)
 │
 ├── frontend/
+│   ├── .eslintrc.cjs       no-use-before-define as an ERROR — see section 17
+│   ├── vitest.config.js    jsdom render tests
+│   ├── tailwind.config.js  the two palettes, with contrast ratios recorded
 │   ├── src/
-│   │   ├── pages/          Login, Dashboard, MeetingRoom, History, SignDetection
-│   │   ├── components/     VideoTile, SubtitleBar, TranscriptPanel,
-│   │   │                   SignDetectionPanel, HandOverlayCanvas, ModeSwitch,
-│   │   │                   ErrorBoundary
+│   │   ├── pages/          Login, Home, Lobby, MeetingRoom, MeetingEnded,
+│   │   │                   History, Transcript, SignDetection
+│   │   ├── components/
+│   │   │   ├── ui/         the design system: Icon, Avatar, IconButton,
+│   │   │   │               Dialog, Menu, TextField, Select, ToastHost,
+│   │   │   │               States, TopBar, Logo
+│   │   │   ├── meeting/    Stage, MeetingTile, CaptionRail, ControlBar,
+│   │   │   │               SidePanel, DetailsPanel, PeoplePanel,
+│   │   │   │               LiveTranscriptPanel, SettingsDialog
+│   │   │   └── …           HandOverlayCanvas, DebugOverlay, ErrorBoundary,
+│   │   │                   InterviewModeDialog / Overlay
 │   │   ├── hooks/          useHandLandmarker, useSignSocket, useWebRTC,
-│   │   │                   useSpeechToText, useFocusMonitor
-│   │   ├── services/api.js the only module that calls fetch
+│   │   │                   useSignCaptions, useSpeechCaptions,
+│   │   │                   useCaptionStore, useScreenShare, useInterviewMode,
+│   │   │                   useMediaDevices, useMicLevel,
+│   │   │                   useMeetingPreferences, useClock
+│   │   ├── services/
+│   │   │   ├── api.js      the only module that calls fetch
+│   │   │   ├── stt/        Web Speech and Whisper behind one interface
+│   │   │   └── devicePreferences.js  sessionStorage, never the URL
+│   │   ├── config/         recognition.js — every threshold, in one file
 │   │   ├── context/        AuthContext
+│   │   ├── test/           setup.js (browser API stubs), pages.test.jsx
 │   │   └── utils/          landmarkUtils.js — MUST match normalization.py
+│   │                       formatters.js — dates, durations, meeting codes
 │   └── public/models/      MediaPipe assets              (gitignored)
 │
 ├── database/               schema.sql, seed.sql
@@ -1059,41 +1129,137 @@ BridgeTalk/
 
 ## 17. Testing
 
+There are two suites, and they answer different questions.
+
 ```bash
-source .venv/bin/activate
-pytest backend/tests -v
+# backend — the protocol, the database, the maths
+source .venv/bin/activate && pytest backend/tests -q
+
+# frontend — does every page actually render, and does it lint
+cd frontend && npm run lint && npm test
 ```
 
-**136 tests**, all passing, in ~24 seconds. They run against throwaway
-in-memory SQLite, so no MySQL is needed and no real data can be touched.
+```
+pytest backend/tests -q      276 passed, 2 skipped   (~50s)
+npm run lint                 0 errors, 6 warnings
+npm test                     71 passed               (~3s)
+npx vite build               built in ~2.6s
+```
+
+### Backend — 258 tests
+
+They run against throwaway in-memory SQLite, so no MySQL is needed and no real
+data can be touched.
 
 | File | Covers |
 |---|---|
 | `test_auth.py` | Registration, login, duplicate emails, expired/forged/deleted-user tokens, password hashing, the identical-error rule for unknown email vs wrong password |
-| `test_meetings.py` | Meeting CRUD, join/leave/end, attendance logging, membership boundaries, transcript CRUD and export |
+| `test_meetings.py` | Meeting CRUD, join/leave/end, attendance logging, membership boundaries, history payload shape, history search, and a query-count guard |
+| `test_captions.py` | The one caption protocol: interim replaces, final persists, one row per `segment_id`, and that no row carries accumulated history |
+| `test_transcripts.py` | Transcript CRUD, TXT and PDF export, member-only access |
 | `test_smoothing.py` | The full smoothing algorithm against a synthetic prediction stream with injected time — no webcam or model needed |
 | `test_normalization_parity.py` | Python vs JavaScript agreement to 1e-6, plus the invariants (wrist at origin, furthest landmark at 1.0, translation and scale invariance) |
-| `test_websockets.py` | Socket auth, message validation, the should-initiate rule, verbatim relay, speech relay |
+| `test_websockets.py` | Socket auth, message validation, the should-initiate rule, verbatim relay |
 | `test_focus_events.py` | Interview Mode logging, host-only reads, opt-in enforcement |
 | `test_schema_parity.py` | `schema.sql` and the ORM models describing the same tables, columns and enum values |
+| `test_transcribe.py` | Fragmented WebM audio decoding through the real `StreamDecoder` path |
 
-Two of these were **verified to fail when their fix is removed**, because a test
-that cannot detect the bug it guards is worse than no test: the normalisation
-parity test (inject a 0.001% divergence) and the stale-vote regression test in
-`test_smoothing.py`.
+Several of these were **verified to fail when their fix is removed**, because a
+test that cannot detect the bug it guards is worse than no test:
+
+* `test_normalization_parity.py` — inject a 0.001% divergence
+* the stale-vote regression test in `test_smoothing.py`
+* `test_history_does_not_issue_a_query_per_meeting` — remove the `selectinload`
+* `test_history_search_returns_each_meeting_once` — change the subquery to a JOIN
+
+### Frontend — lint and render tests
+
+Both of these exist because of a specific failure. The meeting room shipped with
+**eleven** use-before-define errors: `const` bindings read above the line that
+initialises them, which throws `Cannot access 'X' before initialization` and
+takes the whole screen to the error boundary. A hook dependency array is the
+trap — the callback body is deferred and looks fine, but `[a, b]` is evaluated
+during render.
+
+`vite build` cannot catch it. It transforms modules and performs no scope
+analysis, so the bundle built cleanly while the page was broken. And
+`npm run lint` had never worked: `package.json` carried the script and four
+pinned ESLint packages since Phase 0 with **no configuration file**, so it
+exited with "couldn't find a configuration file".
+
+So:
+
+* **`frontend/.eslintrc.cjs`** now exists, with `no-use-before-define` as an
+  error, plus `react-hooks/rules-of-hooks`.
+* **`frontend/src/test/`** mounts all eight routes against jsdom with the
+  browser APIs this app needs stubbed — `getUserMedia`, `MediaStream`,
+  `RTCPeerConnection`, `WebSocket`, `AudioContext`, `srcObject` — and fails if
+  anything throws. `setup.js` additionally fails a test when React logs a render
+  error, so a crash swallowed by an error boundary cannot pass silently.
+
+These tests deliberately do **not** test behaviour that needs a camera or a
+voice. They answer the narrower question no human should have to re-check after
+every edit: *does each page render at all?* The behaviour that matters — a
+caption crossing from one browser to the other — is in the manual checklist
+below.
+
+They have already paid for themselves twice: they found the unguarded
+`canvas.getContext('2d')` in `HandOverlayCanvas` (null in a real browser when
+the GPU context is lost, and the throw destroyed the entire meeting to fail at
+drawing a decorative overlay), and they caught that the lobby's device picker
+had no effect because `MeetingRoom` was still reading query parameters after the
+lobby moved to `sessionStorage`.
+
+### Profile comparison (Bug 5)
+
+```bash
+cd frontend && npm run compare:profiles           # warm vs cold profile
+cd frontend && npm run compare:profiles:offline   # and with the font CDN blocked
+```
+
+`scripts/compare-profiles.mjs` drives Chromium through Playwright, captures
+every page from a warm profile and from a brand-new context (which is what an
+incognito window is), and reports a pixel diff **and** a layout fingerprint —
+element boxes, every icon box, whether each webfont loaded, and whether the
+document overflows. The layout fingerprint is the gate: "text and icons are
+misaligned" is a layout statement, and a pixel diff on a page with a live camera
+feed is meaningless because the frame changes between shots.
+
+Current result, with the CDN blocked: **0 of 15 layouts differ**, across five
+pages at 1024/1280/1920 px plus a zoom sweep at 80/100/125%.
+
+### Fonts are self-hosted
+
+Roboto and Material Symbols Outlined come from the `@fontsource/roboto` and
+`material-symbols` npm packages and are served from our own origin. They used to
+load from Google's CDN, and that was Bug 5: measured, the icon font was still
+loading **2.5 seconds** after page load on a good connection, and never arrived
+on a restricted one. **The application now runs entirely offline after setup.**
 
 ### Manual end-to-end checklist
 
-1. `./scripts/run_backend.sh` — `/health` reports `"model": {"loaded": true}`
-2. `./scripts/run_frontend.sh` — log in as the seeded deaf demo user
-3. Create a meeting; note the code
-4. Second window (incognito) — log in as the hearing demo user, join by code
-5. Both video tiles show; call state reaches `connected`
-6. Sign **A**, **B**, **L** — the skeleton tracks, letters appear on both screens
-7. Turn on speech captions in the hearing window; speak — text appears in the deaf window
-8. Check the transcript panel shows both directions with speaker labels
-9. Leave the meeting; check History lists it
-10. `SELECT * FROM transcripts;` in MySQL shows the persisted rows
+Needs **two browser profiles** — not two tabs. Each needs its own camera
+permission and its own login. Add `?debug=1` to the meeting URL for the
+diagnostic overlay.
+
+1. `./scripts/run_backend.sh` — `/health` reports every model's `loaded` state
+2. `./scripts/run_frontend.sh` — sign in as the seeded deaf demo user
+3. Create a meeting from Home; note the code
+4. Second profile — sign in as the hearing demo user, join by code
+5. Both tiles show; the People panel reports audio and video arriving
+6. Deaf user signs — the word appears on **both** screens, **once**
+7. Hearing user speaks — grey interim text appears on **both** screens within
+   about a second and turns white on pause
+8. Rest hands in frame for 30 seconds — **zero** captions
+9. Open the Transcript panel — exactly one entry per utterance, no entry
+   containing an earlier one's text
+10. Present a window — the screen fills the stage and **both camera tiles stay
+    visible**; stop from the browser's own bar and check the layout returns
+11. Leave; the meeting-ended page offers the transcript; History lists it
+12. `SELECT segment_id, source, content FROM transcripts;` — one row per segment
+
+`PROGRESS.md` has the full Part D script, with the expected result for each step
+and what to report back if one fails.
 
 ---
 
@@ -1211,3 +1377,144 @@ Mapped to the SRS:
   WACV 2020. <https://arxiv.org/abs/1910.11006>
 - Sridhar, A. et al. *INCLUDE: A Large Scale Dataset for Indian Sign Language
   Recognition.* ACM Multimedia, 2020.
+
+---
+
+## Models and measured accuracy
+
+Every number here was measured on a held-out split and can be reproduced with
+the commands shown. Nothing is quoted from a training log.
+
+| Model | Input | Classes | Measured | Split |
+|---|---|---|---|---|
+| **ISL words** (BiLSTM) — the demo model | `(30, 132)` | 40 | **85.23%** top-1, 94.63% top-3 · **17.5% WER** continuous | random (see caveat) |
+| **ISL fingerspelling** (MLP) | `(126,)` | 35 | **92.04%** macro recall | pose-disjoint |
+| ASL fingerspelling (MLP) — baseline | `(63,)` | 28 | 90.53% top-1, 96.91% top-3 | contiguous by capture order |
+
+```bash
+python ml/scripts/evaluate.py --model ml/models/isl_model.keras \
+    --labels ml/models/labels_isl.json --prefix isl_ \
+    --report isl_evaluation_report.json --image-tag _isl
+
+# And through the path the browser actually uses, not the training arrays:
+python ml/scripts/test_inference_path.py
+```
+
+Both report the same figures. That agreement is the point: it says the serving
+path applies the same normalisation and feature layout as training did.
+
+### Read the ISL fingerspelling number carefully
+
+`evaluate.py` prints **98.14% top-1** for it. That figure is inflated by class
+size and should not be quoted. The honest headline is **92.04% macro
+recall over the 28 classes that actually have held-out samples**, because:
+
+- **7 classes cannot be judged at all** — `1, 2, 3, 4, 5, 8, L`. The source
+  data contains fewer than three distinct poses for each, so nothing could be
+  held out. They are in training and absent from the test set.
+- **Two classes score zero** — `H, J`. H fails on all 94 of its held-out
+  samples and J on all 11. Where a genuinely unseen pose exists, the model
+  frequently cannot generalise to it.
+
+### Why the split had to be pose-disjoint
+
+The first training run returned 100% train, 100% validation, loss 0.0000 and
+99.75% test. Perfect scores on 35 classes are a leakage signal, so we measured
+instead of reporting:
+
+- no *exact* duplicate feature vectors across splits
+- but median nearest-neighbour distance from a test row to the training set was
+  **0.1018**, while two random different-class rows sit **4.0178** apart — test
+  rows are 40× closer to a training row than two distinct signs are to each other
+- the nearest training neighbour shared the test row's label **100%** of the time
+
+The cause: clustering at a tight threshold collapses **41,609 images into 1,159
+distinct poses (2.8%)**. Several classes have one pose across 1,200 images.
+Because the duplicates are scattered through the folder rather than adjacent,
+contiguous-by-capture-order splitting cannot separate them — any index-based
+split puts copies of the same pose on both sides.
+
+`preprocess.py --split-by-pose` clusters near-duplicate vectors and assigns
+whole **clusters** to train/val/test, so nothing in test has a copy in training.
+
+### Datasets, and their licences
+
+| Model | Source | Licence |
+|---|---|---|
+| ISL words | INCLUDE — Sridhar et al., ACM MM 2020 | research use |
+| ISL fingerspelling | `Hemg/Indian_sign_language_dataset` (Hugging Face) | **none declared** |
+| ASL fingerspelling | `grassknoted/asl-alphabet` (Kaggle) | GPL-2 per its dataset page |
+
+All training data is from public datasets. No gestures were recorded for
+training — `test_realtime.py` and `record_eval_clip.py` use the webcam only to
+*evaluate* an already-trained model.
+
+The ISL fingerspelling dataset **declares no licence**. It is publicly
+downloadable, which is why it was used, but that is not the same as permissive
+terms and should not be presented as such.
+
+### Two limits that apply to every number above
+
+**No signer-independent measurement.** INCLUDE records no signer identity, so
+the word model's test split holds out *clips*, not *people*. Our code writes
+`signer_disjoint: false` everywhere so nothing overstates it. A new signer will
+score below these figures; that gap is the domain gap and is unmeasured.
+
+**Continuous signing is harder than isolated clips.** 85.23% is per-clip.
+Signing a sentence without pausing gives **17.5% word error rate** — roughly
+one word in six wrong. Measured with `ml/scripts/evaluate_continuous.py`.
+
+---
+
+## Interview mode: exactly what it can and cannot do
+
+A web page **cannot** prevent tab switching. There is no API for it, by design.
+What is implemented is the strongest layered version browsers permit, and the
+in-app dialog claims exactly this and no more.
+
+| Layer | Chrome / Edge | Firefox / Safari |
+|---|---|---|
+| Fullscreen on acknowledgement | ✅ | ✅ |
+| Keyboard Lock (Esc, Tab, Ctrl+T/N/W/L/R) | ✅ | ❌ not supported |
+| Detection (`visibilitychange`, `blur`, `fullscreenchange`) | ✅ | ✅ |
+| Blocking overlay until return + re-fullscreen | ✅ | ✅ |
+| Logged to MySQL with duration | ✅ | ✅ |
+| Host alerted live, per participant | ✅ | ✅ |
+
+**It cannot** capture Alt+Tab or Cmd+Tab — those belong to the operating
+system. It cannot see a second monitor, a phone, paper notes, or another person
+in the room. It records when *this tab* loses focus. It is a deterrent, and the
+host is shown which participants have reduced enforcement.
+
+Absences under 900 ms are not reported: that is a notification stealing focus,
+not someone looking an answer up, and reporting them would bury real incidents.
+At 3 violations the host is **prompted**, not forced — ejecting someone from an
+interview is a judgement call.
+
+---
+
+## HTTPS is required in production
+
+`getUserMedia`, the Web Speech API and Keyboard Lock all need a **secure
+context**. `http://localhost` counts, so local development and a one-machine
+demo work over plain HTTP.
+
+**They will not work from another device over `http://192.168.x.x`** — the
+camera simply never starts. A real deployment needs TLS in front of the
+frontend and `wss://` for the three WebSockets. The `docker-compose.yml` here
+does not provide TLS and is not intended to.
+
+---
+
+## Known limitations, stated plainly
+
+| Limitation | What it would take to remove |
+|---|---|
+| 17.5% WER on continuous signing | Continuous sign segmentation is an open research problem; more clips per sign and a model trained on unsegmented streams |
+| No signer-independent accuracy | A dataset that records signer identity, so whole people can be held out |
+| 7 ISL letters cannot be evaluated | A fingerspelling dataset with more than 2 distinct poses per letter |
+| H and J at 0% recall | Same — those letters have too few distinct poses to generalise from |
+| 40-word vocabulary, not a language | ISL has its own grammar and word order; this is isolated-sign recognition, not translation |
+| Docker stack unverified | Docker was not installed on the development machine; `docker compose up --build` has never been run |
+| Web Speech sends audio to Google | Use the Whisper engine, which runs on our own backend |
+| Tailwind build-chain advisories | A breaking Tailwind 4 migration. `npm audit --omit=dev` reports zero — they are dev-only with no exposure in the shipped bundle |

@@ -12,6 +12,7 @@ class TranscriptCreate(BaseModel):
     """Request body for POST /api/transcripts."""
 
     meeting_id: int
+    segment_id: Optional[str] = None
     source: TranscriptSource = Field(
         description="'sign' for model output, 'speech' for Web Speech API output."
     )
@@ -39,6 +40,7 @@ class TranscriptPublic(BaseModel):
     # Denormalised for display so the transcript panel does not need a second
     # request per line just to render a speaker label.
     user_name: str
+    segment_id: Optional[str] = None
     source: TranscriptSource
     content: str
     confidence: Optional[float] = None

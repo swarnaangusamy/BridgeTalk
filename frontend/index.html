@@ -7,7 +7,19 @@
       name="description"
       content="BridgeTalk — real-time sign language to text translation inside a video call."
     />
+    <!-- Dark, so the meeting room does not flash white before React mounts. -->
+    <meta name="theme-color" content="#202124" />
     <title>BridgeTalk</title>
+
+    <!-- Fonts are SELF-HOSTED, loaded by src/index.css from npm packages.
+         They used to come from Google's CDN, and that was Bug 5: on a cold
+         cache the icon font took over two seconds to arrive — measured — and
+         on a restricted or offline network it never arrived at all. Icon
+         glyphs were then absent and body text fell back to the system sans,
+         whose metrics differ, so text and icons read as misaligned.
+
+         Self-hosting also removes the last runtime dependency on a third
+         party, so the application now runs entirely offline after setup. -->
   </head>
   <body>
     <!-- React mounts here. The noscript message matters: this is an

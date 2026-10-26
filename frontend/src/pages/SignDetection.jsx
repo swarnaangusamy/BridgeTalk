@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import HandOverlayCanvas from '../components/HandOverlayCanvas';
 import SignDetectionPanel from '../components/SignDetectionPanel';
-import { useAuth } from '../context/AuthContext';
+import { TopBar } from '../components/ui';
 import { useHandLandmarker } from '../hooks/useHandLandmarker';
 import { useSignSocket } from '../hooks/useSignSocket';
 import { toWireFormat } from '../utils/landmarkUtils';
@@ -28,7 +28,6 @@ import { toWireFormat } from '../utils/landmarkUtils';
 const SEND_INTERVAL_MS = 100; // 10 FPS
 
 export default function SignDetection() {
-  const { user, logout } = useAuth();
 
   const videoRef = useRef(null);
   const rafRef = useRef(null);
@@ -196,22 +195,18 @@ export default function SignDetection() {
   }, []);
 
   return (
-    <main className="mx-auto max-w-6xl p-6">
-      <header className="mb-6 flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight">BridgeTalk — sign detection</h1>
-          <p className="mt-1 text-slate-300">
-            Hand tracking runs in your browser. Only landmark coordinates are sent to the
-            server — your video never leaves this machine.
-          </p>
-        </div>
-        <div className="flex items-center gap-3">
-          <span className="text-sm text-slate-300">{user?.name}</span>
-          <button type="button" onClick={logout}
-                  className="rounded-md border border-ink-700 px-3 py-1.5 text-sm hover:bg-ink-700">
-            Log out
-          </button>
-        </div>
+    <div className="min-h-screen bg-light-bg">
+      <TopBar />
+
+      <main className="mx-auto max-w-6xl px-4 pb-16 sm:px-6">
+      <header className="py-6">
+        <h1 className="text-2xl font-normal text-light-text">Sign recognition check</h1>
+        <p className="mt-2 max-w-2xl text-sm text-light-muted">
+          Point your camera at your hands to see what the model recognises, without
+          needing a second participant. Hand tracking runs in your browser — only
+          landmark coordinates are sent to the server, so your video never leaves
+          this machine.
+        </p>
       </header>
 
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_24rem]">
@@ -221,7 +216,7 @@ export default function SignDetection() {
             Camera preview with hand tracking overlay
           </h2>
 
-          <div className="relative aspect-[4/3] overflow-hidden rounded-xl border border-ink-700 bg-ink-900">
+          <div className="relative aspect-[4/3] overflow-hidden rounded-tile bg-[#202124]">
             <video
               ref={videoRef}
               playsInline
@@ -240,31 +235,31 @@ export default function SignDetection() {
 
             {/* Explicit, visible states rather than a blank rectangle. */}
             {cameraStatus === 'starting' && (
-              <p className="absolute inset-0 grid place-items-center text-slate-300">
+              <p className="absolute inset-0 grid place-items-center text-light-muted">
                 Starting camera…
               </p>
             )}
 
             {(cameraStatus === 'denied' || cameraStatus === 'error') && (
               <div className="absolute inset-0 grid place-items-center p-6" role="alert">
-                <p className="max-w-sm text-center text-signal-bad">{cameraError}</p>
+                <p className="max-w-sm text-center text-light-danger">{cameraError}</p>
               </div>
             )}
 
             {cameraStatus === 'on' && modelStatus === 'loading' && (
-              <p className="absolute inset-0 grid place-items-center bg-ink-900/60 text-slate-200">
+              <p className="absolute inset-0 grid place-items-center bg-light-surface/60 text-light-text">
                 Loading hand-tracking model…
               </p>
             )}
 
             {modelStatus === 'error' && (
               <div className="absolute inset-0 grid place-items-center p-6" role="alert">
-                <p className="max-w-sm text-center text-signal-bad">{modelError}</p>
+                <p className="max-w-sm text-center text-light-danger">{modelError}</p>
               </div>
             )}
 
             {cameraStatus === 'on' && isReady && !detecting && (
-              <p className="absolute inset-0 grid place-items-center bg-ink-900/60 text-slate-200">
+              <p className="absolute inset-0 grid place-items-center bg-light-surface/60 text-light-text">
                 Detection paused
               </p>
             )}
@@ -274,7 +269,7 @@ export default function SignDetection() {
             <button type="button" onClick={toggleDetection} className="btn-primary">
               {detecting ? 'Pause detection' : 'Resume detection'}
             </button>
-            <p className="text-sm text-slate-400">
+            <p className="text-sm text-light-muted">
               {handDetected ? 'Hand in frame' : 'No hand in frame'} · sending at{' '}
               {1000 / SEND_INTERVAL_MS} FPS
             </p>
@@ -298,9 +293,9 @@ export default function SignDetection() {
         />
       </div>
 
-      <section className="panel mt-6">
+      <section className="card p-6 mt-6">
         <h2 className="text-lg font-semibold">Tips for a good result</h2>
-        <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-slate-300">
+        <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-light-muted">
           <li>Light on your hand, not behind it. A window behind you makes a silhouette.</li>
           <li>Keep your whole hand in frame, roughly filling a third of the width.</li>
           <li>Hold each letter still for about a second — the smoothing needs ~7 frames.</li>
@@ -310,6 +305,7 @@ export default function SignDetection() {
           </li>
         </ul>
       </section>
-    </main>
+      </main>
+    </div>
   );
 }

@@ -47,6 +47,11 @@ class MeetingPublic(BaseModel):
     title: str
     host: UserPublic
     is_interview_mode: bool
+    # When the mode was switched on, or null if it is off. The client needs
+    # this to show participants who join late that the mode is already active,
+    # and the host's violation view uses it to ignore focus events from before
+    # the mode started.
+    interview_mode_started_at: Optional[datetime] = None
     started_at: Optional[datetime] = None
     ended_at: Optional[datetime] = None
     created_at: datetime
@@ -65,6 +70,54 @@ class MeetingDetail(MeetingPublic):
     """
 
     participants: list[ParticipantPublic] = []
+
+    # The number of DISTINCT users who joined, including the host.
+    #
+    # Computed by the server with COUNT(DISTINCT user_id) rather than left to
+    # each client to derive from `participants`. Every surface — Home's recent
+    # cards, History rows, the transcript header and the meeting-ended page —
+    # now reads this one field, so they cannot disagree.
+    #
+    # `len(participants)` was what they all used before, and it was a ROW count:
+    # the attendance table was append-only, so somebody who reconnected three
+    # times was reported as three participants. The rows are now unique per
+    # (meeting, user), so this and `len(participants)` agree — but the explicit
+    # count is kept because it states the intent and stays correct if the
+    # participant list is ever paginated or trimmed.
+    participant_count: int = Field(
+        default=0,
+        description=(
+            "Distinct users who joined this meeting, including the host."
+        ),
+    )
+
+
+class MeetingSummary(MeetingDetail):
+    """A meeting as it appears in the history list and on the home page.
+
+    Adds the two things the interface needs for a meeting row that the detail
+    view does not: who took part (so their avatars can be shown) and how many
+    captions were saved.
+
+    WHY THIS CARRIES PARTICIPANTS, WHICH MeetingDetail's DOCSTRING WARNED OFF
+    ------------------------------------------------------------------------
+    MeetingDetail notes that listing history should not "drag every participant
+    row along with every meeting". That concern was about the N+1 query a naive
+    list would cause, and it is addressed rather than ignored: the history
+    endpoint eager-loads participants with `selectinload`, which costs two
+    extra queries for the whole page regardless of how many meetings it
+    returns, and the caption counts come from one grouped COUNT rather than one
+    per meeting. Four queries total, not 2N+1.
+
+    The alternative was for the frontend to fetch each meeting individually to
+    draw its avatars, which is the N+1 the warning was about, moved to the
+    network where it costs more.
+    """
+
+    caption_count: int = Field(
+        default=0,
+        description="Number of saved caption rows, i.e. transcript entries.",
+    )
 
 
 class MeetingJoinResponse(BaseModel):

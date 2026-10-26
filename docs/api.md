@@ -396,3 +396,95 @@ Both translation directions belong on the meeting's text channel, and keeping
 them there means a dropped video call does not take the captions down with it.
 Interim results (`is_final: false`) update the live caption but are never
 persisted — the recogniser revises them word by word.
+
+**This is true for BOTH speech engines.** Whether the text came from the
+browser's Web Speech API or from Whisper on our backend, it reaches the other
+participant by this one path, so the transcript sees a single kind of event.
+
+---
+
+## WebSocket — Whisper transcription
+
+**Endpoint:** `WS /ws/transcribe/{meeting_code}`
+
+The **only** socket in BridgeTalk that carries media, and it exists only while
+the Whisper speech engine is selected. Deliberately separate from
+`/ws/predict`, which carries coordinates and has no code path that could accept
+audio or video — that separation is what keeps the privacy claim obviously true
+rather than a matter of trust.
+
+Recognised text is **not** returned to the meeting from here. It goes back to
+the browser, which relays it over the inference socket exactly as Web Speech
+results do.
+
+### Client → server
+
+Two kinds of frame:
+
+**Binary frames** — compressed audio straight from `MediaRecorder`
+(`audio/webm;codecs=opus` in Chrome and Firefox, `audio/mp4` in Safari), sent
+every 250 ms. Raw binary rather than base64 inside JSON, which would cost a
+third more bandwidth for nothing.
+
+**Text frames** — JSON control messages:
+
+```json
+{ "type": "config", "language": "en-IN" }
+{ "type": "flush" }
+```
+
+`flush` transcribes whatever is buffered immediately. It is sent when the user
+turns captions off mid-sentence, so their last words are not discarded.
+
+### Server → client
+
+```json
+{ "type": "ready", "provider": "whisper", "model": "base",
+  "sample_rate": 16000, "provides_interim": false }
+```
+
+```json
+{ "type": "transcript", "text": "Hello, can you see this?",
+  "confidence": 0.87, "is_final": true,
+  "audio_seconds": 2.1, "latency_ms": 480.2 }
+```
+
+| Field | Meaning |
+|---|---|
+| `provides_interim` | Always `false`. Whisper transcribes finished audio, so there is no partial text — the UI shows a listening indicator instead of half-sentences |
+| `confidence` | `exp(avg_logprob)`, put on the same 0–1 scale as the sign model's softmax so the UI shows one kind of confidence |
+| `audio_seconds` | Length of the utterance that produced this text |
+| `latency_ms` | Transcription time only, not including the wait for the speaker to pause |
+
+### Errors
+
+| Code | Meaning |
+|---|---|
+| `UNAUTHORIZED` | Bad or expired token. Socket closes 1008 |
+| `MODEL_NOT_LOADED` | faster-whisper is not installed, or the model failed to load. **This is the expected state on a fresh clone** — Whisper is an optional fallback, and the Web Speech engine needs none of it |
+| `FFMPEG_MISSING` | ffmpeg is not on the server, so browser audio cannot be decoded |
+| `TRANSCRIBE_FAILED` | The model raised while transcribing one utterance |
+| `INVALID_MESSAGE` | Malformed JSON, or an unknown control type |
+
+### How an utterance is found
+
+Whisper transcribes a *finished* piece of speech; it has no streaming mode. So
+the server buffers audio and decides where a sentence ends using energy-based
+voice activity detection:
+
+1. Audio is decoded to 16 kHz mono float32 by **ffmpeg** — a prerequisite, not
+   a pip package.
+2. Root-mean-square below `0.015` counts as silence.
+3. **0.7 s** of continuous silence ends the utterance.
+4. Utterances under **0.4 s** are discarded — those are coughs, doors and
+   clipped word onsets, and transcribing them produces invented words.
+5. Utterances are cut at **12 s** regardless, so a continuous talker still gets
+   captions rather than an ever-growing buffer.
+
+Trailing silence is kept rather than trimmed: cutting at the exact moment of
+silence clips the final consonant, and Whisper handles a trailing pause better
+than an abrupt truncation.
+
+Cruder than a trained VAD, and deliberately so — it needs no extra model and
+its failure mode is a sentence split at a long pause, which reads fine as
+captions.
