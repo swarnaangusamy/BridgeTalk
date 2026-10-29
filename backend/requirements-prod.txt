@@ -1,0 +1,62 @@
+# Runtime-only dependencies, for deploying the API.
+# ---------------------------------------------------------------------------
+# Install with:
+#     pip install -r backend/requirements-prod.txt
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# `requirements.txt` is the DEVELOPMENT list: it trains models, extracts
+# landmarks from video, plots confusion matrices and downloads datasets. None
+# of that runs on the server, and TensorFlow alone costs 523 MB of resident
+# memory just to import — measured on this project, before a single model is
+# loaded. A 512 MB instance is killed during boot, and the weights are not the
+# problem: the three models are 38 MB between them.
+#
+# So the API serves those models with NumPy instead (26 MB), via the `.npz`
+# sidecars that `ml/scripts/export_numpy_weights.py` derives from the `.keras`
+# files. `backend/tests/test_numpy_model_parity.py` is what makes that safe.
+#
+# With this list the API loads all three models in ~49 MB.
+#
+# WHAT IS DELIBERATELY ABSENT
+# ---------------------------
+#   tensorflow        the sidecars replace it; the Keras path is a fallback
+#                     that never runs when a .npz is present
+#   faster-whisper    the browser's Web Speech API is the primary provider;
+#                     set WHISPER_ENABLED=false to skip loading it
+#   mediapipe         hand tracking runs in the BROWSER, never on the server
+#   opencv            offline video processing only
+#   pandas, scikit-learn, matplotlib, seaborn, kaggle, tqdm
+#                     training, evaluation and dataset tooling
+#   pytest, httpx     tests
+#
+# Both heavy imports are inside functions, so their absence costs nothing at
+# import time and is only noticed if that code path is actually taken.
+
+# --- API ---
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+websockets==14.1
+
+# --- settings and validation ---
+pydantic==2.10.4
+pydantic-settings==2.7.0
+python-dotenv==1.0.1
+email-validator==2.2.0
+
+# --- database ---
+SQLAlchemy==2.0.36
+PyMySQL==1.1.1
+
+# --- auth ---
+cryptography==44.0.0
+python-jose[cryptography]==3.3.0
+passlib==1.7.4
+bcrypt==4.0.1
+
+# --- inference (NumPy only — see the note above) ---
+numpy==1.26.4
+
+# --- transcript export ---
+reportlab==4.2.5

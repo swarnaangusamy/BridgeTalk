@@ -186,6 +186,13 @@ ml/data/eval/
 # backend checks its normalisation version against.
 ml/models/*
 !ml/models/.gitkeep
+# The NumPy sidecars ARE shipped: they are what the deployed API serves,
+# since TensorFlow needs 523 MB just to import and will not fit a 512 MB
+# instance. 2.1 MB between the three, derived from the .keras files by
+# ml/scripts/export_numpy_weights.py and guarded by a parity test.
+!ml/models/static_model.npz
+!ml/models/isl_model.npz
+!ml/models/dynamic_model.npz
 !ml/models/labels.json
 !ml/models/metadata.json
 !ml/models/dataset_manifest.json
