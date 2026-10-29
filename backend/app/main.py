@@ -94,7 +94,12 @@ async def lifespan(app: FastAPI):
     # demos use the browser's Web Speech API and never touch it. Logged at INFO
     # and never fatal — the transcribe socket reports MODEL_NOT_LOADED to any
     # client that asks for it.
-    if transcribe.transcriber.load():
+    if not settings.whisper_enabled:
+        logger.info(
+            "Whisper disabled (WHISPER_ENABLED=false) — the browser's Web Speech "
+            "API is the primary provider and is unaffected"
+        )
+    elif transcribe.transcriber.load():
         logger.info("Whisper speech-to-text ready (%s)", transcribe.transcriber.model_size)
     else:
         logger.info("Whisper not available — %s", transcribe.transcriber.load_error)

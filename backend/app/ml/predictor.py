@@ -92,6 +92,8 @@ class SignPredictor:
 
         self._model: Any = None
         self._compiled: Any = None
+        # "numpy" or "tensorflow", so /health reports which path is serving.
+        self._backend: str = "none"
         self.class_names: list[str] = []
         self.metadata: dict[str, Any] = {}
         self.load_error: Optional[str] = None
@@ -153,6 +155,36 @@ class SignPredictor:
             labels_data = json.loads(labels_path.read_text(encoding="utf-8"))
             self.class_names = labels_data["classes"]
 
+            # PREFER THE NUMPY SIDECAR, WHEN ONE HAS BEEN EXPORTED.
+            #
+            # TensorFlow costs 523 MB of resident memory just to import —
+            # measured on this project, before any model is loaded. The three
+            # models are 38 MB between them. On a 512 MB instance that import
+            # alone is fatal, and nothing about the weights can change it.
+            #
+            # `ml/scripts/export_numpy_weights.py` writes a `.npz` beside each
+            # `.keras` file and `app.ml.numpy_model` serves it with NumPy
+            # (26 MB). The export refuses to write a file that disagrees with
+            # Keras by more than 1e-5, and the parity test re-checks it, because
+            # a reimplementation that is subtly wrong still returns a perfectly
+            # tidy probability vector.
+            #
+            # Training is untouched: `.keras` remains the source of truth, and
+            # this branch is skipped entirely when no sidecar exists.
+            sidecar = model_path.with_suffix(".npz")
+            if sidecar.exists():
+                from app.ml.numpy_model import NumpyModel
+
+                started = time.perf_counter()
+                self._model = NumpyModel.load(sidecar)
+                elapsed = time.perf_counter() - started
+                # The NumPy model IS the inference path: there is no graph to
+                # compile, so both references point at the same object and
+                # predict() needs no branch.
+                self._compiled = self._model
+                self._backend = "numpy"
+                return self._finish_load(labels_path, elapsed)
+
             # Import TensorFlow lazily. It takes seconds to import and pulls in
             # a lot of native code; a deployment that never loads a model
             # should not pay that cost.
@@ -189,6 +221,16 @@ class SignPredictor:
             self._compiled = None
             return False
 
+        self._backend = "tensorflow"
+        return self._finish_load(labels_path, elapsed)
+
+    def _finish_load(self, labels_path: Path, elapsed: float) -> bool:
+        """The checks, logging and warm-up both backends share.
+
+        Extracted when the NumPy path was added, so the two loaders cannot
+        drift apart: a shape check that applied to only one of them would be
+        a silent hole exactly where this class is most careful.
+        """
         # --- shape sanity ---------------------------------------------------
         # A model whose output width disagrees with its labels file would
         # silently map probabilities to the wrong classes.
