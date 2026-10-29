@@ -96,6 +96,18 @@ class Settings(BaseSettings):
     # user does not want audio sent to Google. "base" is ~150 MB and runs
     # comfortably on CPU; "tiny" is faster and worse, "small" the reverse.
     whisper_model_size: str = "base"
+    # Set WHISPER_ENABLED=false to skip loading it at startup entirely.
+    #
+    # This exists for memory-constrained hosting. Whisper is the FALLBACK
+    # speech provider — the browser's Web Speech API is the primary one and
+    # most sessions never touch Whisper — but it is loaded eagerly at startup,
+    # where it is the difference between fitting a 512 MB instance and being
+    # killed by the OOM reaper part-way through boot.
+    #
+    # Skipping it changes nothing else: the transcribe socket already reports
+    # MODEL_NOT_LOADED to any client that asks, which is the same thing it does
+    # when the download fails.
+    whisper_enabled: bool = True
     # Kept inside the repo (gitignored) rather than ~/.cache, so the download
     # is visible, obviously disposable, and cannot silently happen twice.
     whisper_cache_dir: str = "ml/models/whisper"
